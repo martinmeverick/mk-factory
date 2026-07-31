@@ -219,6 +219,7 @@ final class IssuedInvoiceLifecycle
             'country' => $organization->country,
             'email' => $organization->email,
             'phone' => $organization->phone,
+            'website' => $organization->website,
         ];
     }
 

@@ -26,7 +26,7 @@ final class InvoicePdfDataFactory
         $isDraft = $invoice->status === IssuedInvoiceStatus::Draft;
         $organization = $invoice->organization;
 
-        $supplier = (! $isDraft && $invoice->supplier_snapshot)
+        $supplier = $this->normalize((! $isDraft && $invoice->supplier_snapshot)
             ? $invoice->supplier_snapshot
             : [
                 'name' => $organization->name,
@@ -39,9 +39,9 @@ final class InvoicePdfDataFactory
                 'email' => $organization->email,
                 'phone' => $organization->phone,
                 'website' => $organization->website,
-            ];
+            ], ['name', 'ico', 'dic', 'street', 'city', 'zip', 'country', 'email', 'phone', 'website']);
 
-        $customer = (! $isDraft && $invoice->customer_snapshot)
+        $customer = $this->normalize((! $isDraft && $invoice->customer_snapshot)
             ? $invoice->customer_snapshot
             : [
                 'name' => $invoice->contact?->name,
@@ -51,7 +51,7 @@ final class InvoicePdfDataFactory
                 'city' => $invoice->contact?->city,
                 'zip' => $invoice->contact?->zip,
                 'country' => $invoice->contact?->country,
-            ];
+            ], ['name', 'ico', 'dic', 'street', 'city', 'zip', 'country']);
 
         $bankAccount = (! $isDraft && $invoice->bank_account_snapshot)
             ? $invoice->bank_account_snapshot
@@ -97,6 +97,25 @@ final class InvoicePdfDataFactory
             logoDataUri: $this->logoDataUri($organization->logo_path),
             qrDataUri: $this->qrDataUri($invoice, $bankAccount, $isDraft),
         );
+    }
+
+    /**
+     * Doplní chybějící klíče (starší snapshoty nemusí obsahovat vše,
+     * co šablona očekává).
+     *
+     * @param  array<string, mixed>  $data
+     * @param  list<string>  $keys
+     * @return array<string, ?string>
+     */
+    private function normalize(array $data, array $keys): array
+    {
+        $normalized = [];
+
+        foreach ($keys as $key) {
+            $normalized[$key] = $data[$key] ?? null;
+        }
+
+        return $normalized;
     }
 
     /**
