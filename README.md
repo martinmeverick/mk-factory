@@ -1,58 +1,97 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# MK Factory — fakturační systém
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Samostatný multi-tenant fakturační systém (Laravel 13, server-side Blade,
+MariaDB/MySQL). MVP pokrývá vydané a přijaté faktury, kontakty, projekty,
+PDF s QR Platbou (SPD 1.0) a dashboard. Podrobnosti v `docs/`.
 
-## About Laravel
+## Požadavky
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- PHP ≥ 8.3 (vyvíjeno na 8.5) s rozšířeními: pdo_mysql, pdo_sqlite, mbstring,
+  bcmath, gd, intl, fileinfo, zip
+- Composer 2
+- MySQL 8 / MariaDB ≥ 10.4 (lokálně XAMPP)
+- Node.js NENÍ potřeba (žádný JS build — statické CSS v `public/css/app.css`)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
-
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+## Instalace (macOS, XAMPP)
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+cd /Applications/XAMPP/xamppfiles/htdocs/mk-factory
+composer install
+cp .env.example .env        # pokud .env neexistuje
+php artisan key:generate
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+## Konfigurace databáze
 
-## Contributing
+`.env` (výchozí hodnoty pro XAMPP MariaDB na 127.0.0.1:3306):
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+```
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=mk_factory
+DB_USERNAME=root
+DB_PASSWORD=
+```
 
-## Code of Conduct
+Vytvoření databáze:
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+```bash
+/Applications/XAMPP/xamppfiles/bin/mysql -u root -e "CREATE DATABASE IF NOT EXISTS mk_factory CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+```
 
-## Security Vulnerabilities
+## Migrace a demo data
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+```bash
+php artisan migrate           # schéma
+php artisan db:seed           # demo data (organizace „U Jabka Demo“)
+# nebo obojí najednou od nuly:
+php artisan migrate:fresh --seed
+```
 
-## License
+Demo přihlášení: **demo@mkfactory.test** / **password**
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+## Spuštění
+
+```bash
+php artisan serve
+```
+
+Aplikace poběží na http://localhost:8000 (přihlašovací stránka).
+
+## Testy
+
+```bash
+php artisan test
+```
+
+Testy běží proti SQLite in-memory (viz `phpunit.xml`), žádná příprava DB
+není potřeba.
+
+## Generovaná PDF a soubory
+
+- PDF faktur se generují **on-demand** (tlačítko „Stáhnout PDF“ na detailu
+  faktury) — na disk se neukládají.
+- Logo organizace a přílohy přijatých faktur: `storage/app/private/`
+  (privátní disk, mimo webroot).
+
+## Omezení MVP
+
+- Jen CZK, jedna jazyková verze (čeština).
+- Bez e-mailů, bankovního párování, OCR, dobropisů, záloh — viz
+  `docs/FUTURE_BACKLOG.md`.
+- Role owner/member zatím bez rozdílu oprávnění.
+- Aplikace není certifikovaný účetní software (`docs/PRODUCT_SCOPE.md`).
+
+## Dokumentace
+
+| Soubor | Obsah |
+|---|---|
+| docs/PRODUCT_SCOPE.md | rozsah a ohrady produktu |
+| docs/ARCHITECTURE.md | vrstvy, tenancy, peníze, kontrakty služeb |
+| docs/DATA_MODEL.md | schéma databáze |
+| docs/INVOICE_LIFECYCLE.md | stavy faktur, neměnnost, číslování |
+| docs/PDF_AND_QR.md | volba knihoven, SPD, fonty |
+| docs/INTEGRATION_CONTRACT.md | návrh budoucího REST API |
+| docs/SECURITY_NOTES.md | bezpečnostní model a známá omezení |
+| docs/FUTURE_BACKLOG.md | odložené funkce |
