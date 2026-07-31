@@ -39,6 +39,8 @@ class IssuedInvoice extends Model
         'customer_snapshot',
         'bank_account_snapshot',
         'footer_text',
+        // Tiskne se na fakturu, proto je po vystavení součástí dokladu.
+        'note',
     ];
 
     protected $guarded = [];

@@ -20,6 +20,7 @@ use App\Models\InvoiceNumberSeries;
 use App\Models\IssuedInvoice;
 use App\Models\Project;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -142,6 +143,13 @@ class IssuedInvoiceController extends Controller
             $this->lifecycle->issue($invoice, CarbonImmutable::parse($invoice->issue_date));
         } catch (InvoiceNotIssuable|InvalidStateTransition $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
+        } catch (UniqueConstraintViolationException) {
+            // Číslo z řady už existuje (typicky po ručním snížení „dalšího čísla“).
+            return redirect()->route('invoices.show', $invoice)->with(
+                'error',
+                'Fakturu nelze vystavit: číslo z této řady už existuje. '
+                .'Upravte „další číslo“ číselné řady v nastavení a zkuste to znovu.',
+            );
         }
 
         return redirect()->route('invoices.show', $invoice)

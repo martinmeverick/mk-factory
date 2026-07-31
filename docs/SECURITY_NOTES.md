@@ -15,6 +15,13 @@
   na všech obchodních modelech + auto-fill při create.
 - Route-model binding díky scope vrací pro cizí záznamy 404 (záznam
   „neexistuje“) — žádné ID enumeration přes URL.
+- **Pořadí middlewaru je bezpečnostně kritické.** `SetCurrentOrganization`
+  musí běžet PŘED `SubstituteBindings`, jinak se binding resolvuje bez
+  nastavené organizace, scope je no-op a načtou se i cizí záznamy (čtení
+  cizích faktur vč. PDF, přepis cizích účtů a číselných řad, mazání cizích
+  příloh). Zajišťuje `prependToPriorityList()` v `bootstrap/app.php`;
+  regresi hlídá `tests/Feature/Security/AccessControlTest.php`. Při přidání
+  dalšího middlewaru pracujícího s tenantem tuto prioritu ověřte.
 - Formulářové `exists` validace cizích klíčů (contact_id, project_id,
   bank_account_id, number_series_id) jsou explicitně omezené na aktuální
   organizaci — nelze podstrčit cizí ID.
@@ -52,6 +59,13 @@
 
 - Role owner/member zatím nemají odlišná oprávnění (každý člen organizace
   může vše v rámci organizace). Zpřísnění rolí = budoucí task.
+- Izolaci organizací drží JEDNA vrstva (globální scope + pořadí middlewaru).
+  Laravel Policies jako druhá vrstva obrany zatím nejsou — doporučeno doplnit
+  před nasazením pro více organizací s odlišnými vlastníky.
+- Modely mají `$guarded = []`. Controllery plní jen validovaná pole, takže
+  dnes nelze podstrčit `organization_id` ani `status`, ale jakýkoli budoucí
+  `Model::create($request->all())` by to umožnil — při rozšiřování doplňte
+  explicitní `$fillable`.
 - Chybí rate limiting na login (Laravel throttle middleware — doplnit před
   veřejným nasazením).
 - Žádné 2FA, žádný audit přihlášení.

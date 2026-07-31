@@ -15,6 +15,15 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'org' => \App\Http\Middleware\SetCurrentOrganization::class,
         ]);
+
+        // Aktivní organizace musí být nastavena DŘÍV, než route-model binding
+        // načte modely — jinak je tenant scope při bindingu neaktivní a
+        // resolvují se i záznamy cizích organizací.
+        $middleware->prependToPriorityList(
+            before: \Illuminate\Routing\Middleware\SubstituteBindings::class,
+            prepend: \App\Http\Middleware\SetCurrentOrganization::class,
+        );
+
         $middleware->redirectGuestsTo(fn () => route('login'));
     })
     ->withExceptions(function (Exceptions $exceptions): void {
