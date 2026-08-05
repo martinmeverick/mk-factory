@@ -5,10 +5,12 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Domain\Invoicing\InvalidStateTransition;
+use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\InvoiceNotIssuable;
 use App\Domain\Invoicing\IssuedInvoiceLifecycle;
 use App\Domain\Money\InvoiceTotalsCalculator;
 use App\Domain\Money\Money;
+use App\Domain\Money\MoneyOverflow;
 use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\ContactType;
 use App\Enums\IssuedInvoiceStatus;
@@ -70,12 +72,24 @@ class IssuedInvoiceController extends Controller
 
     public function store(IssuedInvoiceRequest $request): RedirectResponse
     {
-        $invoice = DB::transaction(function () use ($request) {
-            $invoice = IssuedInvoice::create($this->headerData($request));
-            $this->syncItems($invoice, $request->validated('items'));
+        try {
+            $invoice = DB::transaction(function () use ($request) {
+                $invoice = IssuedInvoice::create($this->headerData($request));
 
-            return $invoice;
-        });
+                foreach ($this->itemRows($request->validated('items')) as $position => $item) {
+                    $invoice->items()->create($item + [
+                        'organization_id' => $invoice->organization_id,
+                        'position' => $position + 1,
+                    ]);
+                }
+
+                $this->calculator->recalculate($invoice);
+
+                return $invoice;
+            });
+        } catch (MoneyOverflow $e) {
+            return back()->withInput()->withErrors(['items' => $e->getMessage()]);
+        }
 
         return redirect()->route('invoices.show', $invoice)
             ->with('status', 'Koncept faktury byl vytvořen.');
@@ -107,16 +121,18 @@ class IssuedInvoiceController extends Controller
 
     public function update(IssuedInvoiceRequest $request, IssuedInvoice $invoice): RedirectResponse
     {
-        if (! $invoice->isEditable()) {
-            return redirect()->route('invoices.show', $invoice)
-                ->with('error', 'Vystavenou fakturu nelze upravovat.');
+        // O editovatelnosti rozhoduje až zamčený řádek v lifecycle vrstvě.
+        try {
+            $this->lifecycle->updateDraft(
+                $invoice,
+                $this->headerData($request),
+                $this->itemRows($request->validated('items')),
+            );
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
+        } catch (MoneyOverflow $e) {
+            return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
-
-        DB::transaction(function () use ($request, $invoice) {
-            $invoice->update($this->headerData($request));
-            $invoice->items()->delete();
-            $this->syncItems($invoice, $request->validated('items'));
-        });
 
         return redirect()->route('invoices.show', $invoice)
             ->with('status', 'Koncept faktury byl upraven.');
@@ -124,15 +140,11 @@ class IssuedInvoiceController extends Controller
 
     public function destroy(IssuedInvoice $invoice): RedirectResponse
     {
-        if (! $invoice->isEditable()) {
-            return redirect()->route('invoices.show', $invoice)
-                ->with('error', 'Smazat lze pouze koncept faktury.');
+        try {
+            $this->lifecycle->deleteDraft($invoice);
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
-
-        DB::transaction(function () use ($invoice) {
-            $invoice->items()->delete();
-            $invoice->delete();
-        });
 
         return redirect()->route('invoices.index')->with('status', 'Koncept faktury byl smazán.');
     }
@@ -141,7 +153,7 @@ class IssuedInvoiceController extends Controller
     {
         try {
             $this->lifecycle->issue($invoice, CarbonImmutable::parse($invoice->issue_date));
-        } catch (InvoiceNotIssuable|InvalidStateTransition $e) {
+        } catch (InvoiceNotIssuable|InvalidStateTransition|InvoiceNotFound|MoneyOverflow $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         } catch (UniqueConstraintViolationException) {
             // Číslo z řady už existuje (typicky po ručním snížení „dalšího čísla“).
@@ -167,7 +179,7 @@ class IssuedInvoiceController extends Controller
                 CarbonImmutable::parse($request->validated('paid_on')),
                 $request->validated('note'),
             );
-        } catch (InvalidStateTransition|\InvalidArgumentException $e) {
+        } catch (InvalidStateTransition|InvoiceNotFound|MoneyOverflow|\InvalidArgumentException $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
 
@@ -178,7 +190,7 @@ class IssuedInvoiceController extends Controller
     {
         try {
             $this->lifecycle->markPaid($invoice, CarbonImmutable::now());
-        } catch (InvalidStateTransition $e) {
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
 
@@ -189,7 +201,7 @@ class IssuedInvoiceController extends Controller
     {
         try {
             $this->lifecycle->cancel($invoice);
-        } catch (InvalidStateTransition $e) {
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
 
@@ -220,32 +232,27 @@ class IssuedInvoiceController extends Controller
     }
 
     /**
-     * Založí položky konceptu a přepočítá součty. Jen pro draft — hooky
-     * modelu položek jinak vyhodí výjimku.
+     * Převede vstup formuláře na řádky položek (bez position a organizace —
+     * ty doplní vrstva, která je zakládá).
      *
      * @param  array<int, array<string, mixed>>  $items
+     * @return list<array<string, mixed>>
      */
-    private function syncItems(IssuedInvoice $invoice, array $items): void
+    private function itemRows(array $items): array
     {
         $settings = app(CurrentOrganization::class)->getOrFail()->settings;
         $vatPayer = (bool) $settings?->vat_payer;
 
-        foreach (array_values($items) as $position => $item) {
-            $invoice->items()->create([
-                'organization_id' => $invoice->organization_id,
-                'position' => $position + 1,
-                'description' => $item['description'],
-                'quantity' => str_replace(',', '.', $item['quantity']),
-                'unit' => $item['unit'],
-                'unit_price_minor' => Money::fromDecimalString($item['unit_price'], 'CZK')->getMinor(),
-                'vat_rate' => $vatPayer ? ($item['vat_rate'] ?? '0') : null,
-                'line_subtotal_minor' => 0,
-                'line_vat_minor' => 0,
-                'line_total_minor' => 0,
-            ]);
-        }
-
-        $this->calculator->recalculate($invoice->refresh());
+        return array_values(array_map(fn (array $item): array => [
+            'description' => $item['description'],
+            'quantity' => str_replace(',', '.', $item['quantity']),
+            'unit' => $item['unit'],
+            'unit_price_minor' => Money::fromDecimalString($item['unit_price'], 'CZK')->getMinor(),
+            'vat_rate' => $vatPayer ? ($item['vat_rate'] ?? '0') : null,
+            'line_subtotal_minor' => 0,
+            'line_vat_minor' => 0,
+            'line_total_minor' => 0,
+        ], $items));
     }
 
     /**

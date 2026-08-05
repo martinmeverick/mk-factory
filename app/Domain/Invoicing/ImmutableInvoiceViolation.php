@@ -18,6 +18,14 @@ class ImmutableInvoiceViolation extends DomainException
         ));
     }
 
+    public static function forDeletion(IssuedInvoice $invoice): self
+    {
+        return new self(sprintf(
+            'Fakturu %s nelze smazat: smazat lze pouze koncept.',
+            $invoice->invoice_number ?? '#'.$invoice->getKey(),
+        ));
+    }
+
     public static function forItems(IssuedInvoice $invoice): self
     {
         return new self(sprintf(

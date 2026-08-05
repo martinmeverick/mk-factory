@@ -41,6 +41,27 @@ class IssuedInvoice extends Model
         'footer_text',
         // Tiskne se na fakturu, proto je po vystavení součástí dokladu.
         'note',
+        // Logo zmrazené k okamžiku vystavení (historický doklad se nesmí měnit).
+        'logo_snapshot_path',
+    ];
+
+    /**
+     * Atributy, které smí zapsat jednotlivé lifecycle operace. Úzce vymezené
+     * seznamy nahrazují dřívější obecný escape hatch — neexistuje způsob, jak
+     * touto cestou změnit organization_id, položky ani libovolný atribut.
+     */
+    private const array ISSUE_ATTRIBUTES = [
+        'status',
+        'invoice_number',
+        'variable_symbol',
+        'issue_date',
+        'due_date',
+        'supplier_snapshot',
+        'customer_snapshot',
+        'bank_account_snapshot',
+        'footer_text',
+        'logo_snapshot_path',
+        'issued_at',
     ];
 
     protected $guarded = [];
@@ -53,12 +74,6 @@ class IssuedInvoice extends Model
         'total_minor' => 0,
         'paid_amount_minor' => 0,
     ];
-
-    /**
-     * Escape hatch pro lifecycle službu — jednorázově (do dalšího save)
-     * povolí zápis chráněných atributů.
-     */
-    private bool $lifecycleTransitionAllowed = false;
 
     protected function casts(): array
     {
@@ -83,15 +98,10 @@ class IssuedInvoice extends Model
     protected static function booted(): void
     {
         static::updating(function (self $invoice): void {
-            if ($invoice->lifecycleTransitionAllowed) {
-                return;
-            }
-
-            $originalStatus = $invoice->getOriginal('status');
-
-            // Neměnnost hlídáme od okamžiku vystavení (původní stav != draft).
-            if (! $originalStatus instanceof IssuedInvoiceStatus
-                || $originalStatus === IssuedInvoiceStatus::Draft) {
+            // Stav se čte z DATABÁZE, ne z (potenciálně zastaralé) instance.
+            // Jinak by stará draft instance mohla po souběžném vystavení
+            // přepsat chráněné údaje už vystaveného dokladu.
+            if ($invoice->persistedStatus() === IssuedInvoiceStatus::Draft) {
                 return;
             }
 
@@ -102,16 +112,83 @@ class IssuedInvoice extends Model
             }
         });
 
-        static::saved(function (self $invoice): void {
-            $invoice->lifecycleTransitionAllowed = false;
+        static::deleting(function (self $invoice): void {
+            if ($invoice->persistedStatus() !== IssuedInvoiceStatus::Draft) {
+                throw ImmutableInvoiceViolation::forDeletion($invoice);
+            }
         });
     }
 
-    public function allowLifecycleTransition(): static
+    /**
+     * Aktuální stav podle databáze (nikoli podle této PHP instance).
+     * Uvnitř transakce se zamčeným řádkem jde o levné čtení.
+     */
+    public function persistedStatus(): ?IssuedInvoiceStatus
     {
-        $this->lifecycleTransitionAllowed = true;
+        if (! $this->exists) {
+            return null;
+        }
 
-        return $this;
+        $value = static::query()
+            ->withoutGlobalScope('organization')
+            ->whereKey($this->getKey())
+            ->value('status');
+
+        // value() vrací hodnotu už přetypovanou castem, ale u raw dotazů
+        // může přijít i string — přijmeme obojí.
+        return match (true) {
+            $value === null => null,
+            $value instanceof IssuedInvoiceStatus => $value,
+            default => IssuedInvoiceStatus::from((string) $value),
+        };
+    }
+
+    /**
+     * Vystavení faktury — jediná lifecycle operace, která smí zapsat chráněné
+     * atributy. Klíče mimo whitelist jsou odmítnuty.
+     *
+     * @param  array<string, mixed>  $attributes
+     *
+     * @internal Volá výhradně App\Domain\Invoicing\IssuedInvoiceLifecycle.
+     */
+    public function applyIssued(array $attributes): void
+    {
+        $unexpected = array_diff(array_keys($attributes), self::ISSUE_ATTRIBUTES);
+
+        if ($unexpected !== []) {
+            throw ImmutableInvoiceViolation::forAttribute($this, implode(', ', $unexpected));
+        }
+
+        $this->forceFill($attributes)->save();
+    }
+
+    /**
+     * Zápis stavu úhrady. Užší než obecný zápis — nelze jí změnit číslo
+     * faktury, snapshoty, částky dokladu ani tenant identitu.
+     *
+     * @internal Volá výhradně App\Domain\Invoicing\IssuedInvoiceLifecycle.
+     */
+    public function applyPaymentState(
+        int $paidAmountMinor,
+        IssuedInvoiceStatus $status,
+        ?\DateTimeInterface $paidAt,
+    ): void {
+        $this->forceFill([
+            'paid_amount_minor' => $paidAmountMinor,
+            'status' => $status,
+            'paid_at' => $paidAt,
+        ])->save();
+    }
+
+    /**
+     * @internal Volá výhradně App\Domain\Invoicing\IssuedInvoiceLifecycle.
+     */
+    public function applyCancelled(\DateTimeInterface $cancelledAt): void
+    {
+        $this->forceFill([
+            'status' => IssuedInvoiceStatus::Cancelled,
+            'cancelled_at' => $cancelledAt,
+        ])->save();
     }
 
     public function contact(): BelongsTo

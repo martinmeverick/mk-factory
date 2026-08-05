@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Domain\Tenancy\BelongsToOrganization;
+use App\Enums\IssuedInvoiceStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -31,12 +32,27 @@ class IssuedInvoiceItem extends Model
     protected static function booted(): void
     {
         // Položky lze měnit jen dokud je rodičovská faktura koncept.
+        // Stav se čte z DATABÁZE, ne z načtené (možná zastaralé) relace —
+        // jinak by stará instance mohla měnit položky vystavené faktury.
         $guard = function (self $item): void {
-            $invoice = $item->relationLoaded('invoice')
-                ? $item->invoice
-                : $item->invoice()->withoutGlobalScope('organization')->first();
+            $invoiceId = $item->issued_invoice_id;
 
-            if ($invoice !== null && ! $invoice->isEditable()) {
+            if ($invoiceId === null) {
+                return;
+            }
+
+            $status = IssuedInvoice::query()
+                ->withoutGlobalScope('organization')
+                ->whereKey($invoiceId)
+                ->value('status');
+
+            $status = $status instanceof IssuedInvoiceStatus ? $status->value : $status;
+
+            if ($status !== null && $status !== IssuedInvoiceStatus::Draft->value) {
+                $invoice = $item->relationLoaded('invoice') && $item->invoice !== null
+                    ? $item->invoice
+                    : new IssuedInvoice(['id' => $invoiceId]);
+
                 throw ImmutableInvoiceViolation::forItems($invoice);
             }
         };
