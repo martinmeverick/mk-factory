@@ -13,7 +13,6 @@ use App\Domain\Money\Money;
 use App\Domain\Money\MoneyOverflow;
 use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\ContactType;
-use App\Enums\IssuedInvoiceStatus;
 use App\Http\Requests\IssuedInvoiceRequest;
 use App\Http\Requests\PaymentRequest;
 use App\Models\BankAccount;

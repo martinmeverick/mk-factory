@@ -9,7 +9,6 @@ use App\Domain\Ares\AresUnavailable;
 use App\Enums\ContactType;
 use App\Models\Contact;
 use Illuminate\Database\UniqueConstraintViolationException;
-use Illuminate\Support\Facades\DB;
 
 /**
  * Najde dodavatele podle IČO v aktuální organizaci, a pokud ještě neexistuje,

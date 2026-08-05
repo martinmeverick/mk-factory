@@ -61,12 +61,38 @@ Aplikace poběží na http://localhost:8000 (přihlašovací stránka).
 
 ## Testy
 
+Rychlá hlavní sada (SQLite in-memory, viz `phpunit.xml`) — žádná příprava
+databáze není potřeba:
+
 ```bash
-php artisan test
+composer test
 ```
 
-Testy běží proti SQLite in-memory (viz `phpunit.xml`), žádná příprava DB
-není potřeba.
+### Testy souběhu nad MariaDB
+
+Zámky (`SELECT … FOR UPDATE`) na SQLite **nefungují** — jsou tam no-op.
+Zelená hlavní sada proto sama o sobě není důkazem správného souběhu.
+Testy závislé na skutečných zámcích jsou proto oddělené a běží proti
+MariaDB ve **skutečně samostatných procesech** (pcntl fork), každý
+s vlastním DB spojením:
+
+```bash
+composer test:concurrency
+```
+
+Předpoklady:
+
+- běžící MariaDB/MySQL a databáze `mk_factory_test`:
+
+```bash
+/Applications/XAMPP/xamppfiles/bin/mysql -u root -e "CREATE DATABASE IF NOT EXISTS mk_factory_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+```
+
+- PHP rozšíření `pcntl` (bez něj se testy přeskočí, ne tiše „projdou“).
+
+Konfigurace je v `phpunit.concurrency.xml`; sada si databázi sama migruje
+(`migrate:fresh`), takže **nepoužívejte produkční databázi**. Co pokrývá,
+je popsáno v `docs/INVOICE_LIFECYCLE.md` (sekce Souběh).
 
 ## Generovaná PDF a soubory
 

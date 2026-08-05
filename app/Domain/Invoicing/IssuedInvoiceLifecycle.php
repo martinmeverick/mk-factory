@@ -12,7 +12,6 @@ use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\IssuedInvoiceStatus;
 use App\Models\BankAccount;
 use App\Models\Contact;
-use App\Models\InvoiceNumberSeries;
 use App\Models\IssuedInvoice;
 use App\Models\Organization;
 use Carbon\CarbonImmutable;

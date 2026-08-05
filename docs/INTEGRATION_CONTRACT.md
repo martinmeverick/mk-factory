@@ -67,22 +67,38 @@ Odběratelem je **převážně fyzická osoba bez IČO**, což určuje způsob p
 
 ### Párování zákazníka — `App\Domain\Contacts\CustomerResolver`
 
-Pořadí klíčů (první nález vyhrává):
+Pořadí klíčů:
 
 1. **`external_id`** — id zákazníka v e-shopu. Jediný spolehlivý klíč,
    unikátní v rámci organizace. Integrace ho má posílat vždy.
-2. **IČO** — jen u firemních objednávek, když ho zákazník uvedl.
-3. **e-mail** — záchrana pro objednávky bez `external_id`.
+2. **IČO** — jen u firemních objednávek bez `external_id`.
+3. **e-mail** — jen bez `external_id` i IČA a jen při právě jedné shodě.
 4. jinak se založí nový kontakt.
 
-Pravidla, na kterých integrace stojí:
+Pořadí je STRIKTNÍ — slabší klíč nikdy nezachraňuje neúspěch silnějšího:
+
+- Je-li dodán `external_id`, hledá se **výhradně** podle kombinace
+  (organizace, external_id). Když nic nenajde, založí se nový kontakt.
+  Párování se v tom případě NESMÍ „zachránit“ e-mailem ani IČEM — jinak by
+  nová identita tiše splynula se starým kontaktem.
+- IČO se použije jen tehdy, když `external_id` dodán není.
+- E-mail se použije jen bez `external_id` i bez použitelného IČA.
+- **Párování e-mailem platí jen při právě jedné shodě.** Při více shodách
+  resolver vyhodí `AmbiguousCustomerMatch`; nikdy nevybere první řádek podle
+  pořadí v databázi. Fakturu není přípustné přiřadit odhadem.
+- Všechny dotazy jsou omezené aktuální organizací.
+
+Další pravidla:
 
 - **IČO NENÍ povinné ani párovací.** Libovolný počet zákazníků bez IČO je
   v pořádku (v unikátním indexu se NULL opakovat smí).
 - **E-mail se nevynucuje jako unikátní** — jednu adresu může sdílet víc
   osob (domácnost, firma) a tvrdá unikátnost by legitimní objednávky rozbila.
 - Zná-li se zákazník už jako dodavatel, povýší se na „odběratel i dodavatel“
-  místo vzniku druhého záznamu; chybějící `external_id` se doplní.
+  místo vzniku druhého záznamu. `external_id` se na kontakt nalezený slabším
+  klíčem **nedopisuje**.
+- Konflikt „nové `external_id` + IČO už patří jinému kontaktu“ končí
+  `AmbiguousCustomerMatch` — sloučení identit je rozhodnutí pro člověka.
 
 ### Navržený tok objednávky
 
@@ -107,6 +123,25 @@ Server: vyřeší zákazníka resolverem → založí koncept → volitelně rov
 vystaví (`issue: true`) → vrátí číslo faktury a odkaz na PDF. `Idempotency-Key`
 odvozený od id objednávky zajistí, že opakované doručení webhooku nevytvoří
 druhou fakturu.
+
+### Chování při chybě
+
+Integrace musí počítat s tím, že server mutaci **odmítne**, nikoli tiše
+uhodne. Kromě validačních chyb jsou to zejména:
+
+| Situace | Výsledek |
+|---|---|
+| dvojznačný e-mail bez silnějšího klíče | `AmbiguousCustomerMatch` |
+| nové `external_id` s obsazeným IČEM | `AmbiguousCustomerMatch` |
+| nulový nebo záporný součet faktury | `InvoiceNotIssuable` |
+| částka mimo podporovaný rozsah | `MoneyOverflow` |
+| faktura patří jiné organizaci | `InvoiceNotFound` (fail closed) |
+| souběžný protichůdný přechod | `InvalidStateTransition` |
+
+Mutace faktur jsou serializované zámkem na řádku, takže opakované doručení
+webhooku ani souběžné požadavky nezpůsobí ztracenou platbu ani dvojí
+spotřebování čísla (viz INVOICE_LIFECYCLE.md). `Idempotency-Key` zůstává
+doporučený jako ochrana proti opakovanému vytvoření dokladu.
 
 ### Otevřené otázky pro B2C (před ostrým nasazením)
 

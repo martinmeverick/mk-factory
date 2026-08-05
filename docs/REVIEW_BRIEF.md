@@ -14,12 +14,18 @@ základních funkcí iDokladu) pro firmu, která ho bude používat napříč n�
 projekty. První reálné nasazení: projekt **U Jabka**; dále mk-systems,
 Simona Vojtěšková, MEX, Cashflow.
 
-Stav: **MVP foundation** — funkční vertikální průřez
-organizace → odběratel → faktura → vystavení → PDF → QR platba,
-plus přijaté faktury, projekty, dashboard a napojení na registr ARES.
+Stav: **MVP foundation po opravě nálezů z prvního nezávislého review** —
+funkční vertikální průřez organizace → odběratel → faktura → vystavení →
+PDF → QR platba, plus přijaté faktury, projekty, dashboard a napojení na
+registr ARES.
 
 **Aplikace zatím nebyla použita na skutečné faktury.** Review je předstupeň
 tohoto rozhodnutí.
+
+> **Pro opakované review:** devět nálezů z prvního kola je opraveno a každý
+> má regresní test, u kterého bylo ověřeno, že bez opravy selže. Přehled je
+> v části 7. Nálezy z části 6 (známé slabiny) opravené NEJSOU — jsou to
+> vědomá omezení, ne regrese.
 
 ### Vědomě mimo rozsah
 Bankovní API a párování plateb, OCR, datová schránka, odesílání e-mailem,
@@ -48,14 +54,21 @@ composer install
 cp .env.example .env && php artisan key:generate
 # nastavit DB_* v .env, vytvořit databázi mk_factory
 php artisan migrate:fresh --seed
-php artisan serve            # http://localhost:8000
-php artisan test             # 202 testů
+php artisan serve                  # http://localhost:8000
+composer test                      # rychlá sada (SQLite in-memory)
+composer test:concurrency          # souběh nad MariaDB (viz níže)
 ```
 
 Demo přihlášení: `demo@mkfactory.test` / `password`.
 
-Testy běží proti SQLite in-memory, nepotřebují přípravu a **nesmí sahat na
-síť** — `Tests\TestCase` volá `Http::preventStrayRequests()`.
+Hlavní sada běží proti SQLite in-memory, nepotřebuje přípravu a **nesmí
+sahat na síť** — `Tests\TestCase` volá `Http::preventStrayRequests()`.
+
+**Souběh se na SQLite ověřit nedá** — `SELECT … FOR UPDATE` je tam no-op.
+Testy zámků proto běží odděleně proti MariaDB (databáze `mk_factory_test`,
+konfigurace `phpunit.concurrency.xml`) ve skutečně samostatných procesech
+přes `pcntl_fork`. Bez rozšíření `pcntl` se přeskočí — nikdy se netváří
+jako splněné. Postup je v README.
 
 ---
 
@@ -99,7 +112,21 @@ Pokud kterýkoli z nich prolomíte, je to nález nejvyšší závažnosti.
 
 Seřazeno podle toho, kde je nejvyšší riziko.
 
-### 4.1 Izolace organizací (nejvyšší priorita)
+### 4.0 Souběh a zámky (nejvyšší priorita)
+
+Každá mutace faktury musí jet podle vzoru: transakce → tenant-scoped dotaz →
+`lockForUpdate()` → kontrola stavu nad ZAMČENÝM řádkem → změna → audit.
+Vzor je popsaný v `docs/INVOICE_LIFECYCLE.md`.
+
+Co prověřit: existuje mutační cesta, která se vzoru vyhne (controller,
+observer, příkaz, budoucí API)? Rozhoduje někde ještě stav načtené
+instance místo zamčeného řádku? Je zámek držen po celou dobu výpočtu
+zaplacené částky?
+
+**Nespoléhejte na zelenou hlavní sadu** — SQLite zámky ignoruje. Souběh
+ověřuje `composer test:concurrency` nad MariaDB ve skutečných procesech.
+
+### 4.1 Izolace organizací
 Drží ji **globální scope** traitu `BelongsToOrganization` plus **pořadí
 middlewaru**: `SetCurrentOrganization` musí běžet **před**
 `SubstituteBindings` (nastaveno v `bootstrap/app.php` přes
@@ -122,20 +149,22 @@ jako suma řádků, rekapitulace DPH po sazbách. Sedí součet rekapitulace
 s celkem vždy? Chování u záporných částek, velkých čísel, desetinného
 množství, sazby 0 %, režimu neplátce (`vat_rate = null`).
 
-### 4.3 Číslování faktur a souběh
+### 4.3 Číslování faktur
 `InvoiceNumberGenerator` (`lockForUpdate` v transakci) + unikátní index
-`(organization_id, invoice_number)`. Je zámek účinný i při `issue()` volaném
-paralelně? Co ruční změna `next_number` v nastavení? Co storno — číslo se
-schválně nevrací do řady.
-
-Pozor: na SQLite (testy) se `FOR UPDATE` chová jako no-op, takže testy
-souběh neprokazují — správnost je potřeba posoudit z kódu.
+`(organization_id, invoice_number)`. Zámek řady je ale JEN zámek řady —
+fakturu zamyká lifecycle zvlášť (viz 4.0). Co ruční změna `next_number`
+v nastavení? Co storno — číslo se schválně nevrací do řady. Neplatný doklad
+(nulový/záporný součet) číslo spotřebovat nesmí.
 
 ### 4.4 Neměnnost vystavené faktury
-`IssuedInvoice::PROTECTED_ATTRIBUTES` + `updating` hook,
-`IssuedInvoiceItem` guardy, escape hatch `allowLifecycleTransition()`.
-Lze obejít přes `forceFill`, query builder (`items()->delete()`),
-`DB::table()`, hromadný update? Je escape hatch bezpečně omezená?
+`IssuedInvoice::PROTECTED_ATTRIBUTES` + `updating` hook (čte stav
+z DATABÁZE, ne z instance), `deleting` hook, guardy `IssuedInvoiceItem`.
+Chráněné atributy zapisují jen úzce vymezené operace `applyIssued()`,
+`applyPaymentState()`, `applyCancelled()` — obecný escape hatch neexistuje.
+
+Lze to obejít přes `forceFill`, query builder (`items()->delete()`),
+`DB::table()` nebo hromadný update? Umí některá z vymezených operací zapsat
+víc, než má? Pozor: guard je defense-in-depth, proti souběhu chrání zámek.
 
 ### 4.5 Uploady
 Logo organizace a přílohy přijatých faktur, privátní disk
@@ -143,7 +172,13 @@ Logo organizace a přílohy přijatých faktur, privátní disk
 autorizovaný controller. Path traversal, typ obsahu vs. přípona,
 Content-Disposition, autorizace stažení i mazání.
 
-### 4.6 ARES a zakládání kontaktů (nejnovější část, nejméně „usazená")
+### 4.6 Peníze na hranicích rozsahu
+`Money` kontroluje rozsah PŘED castem bcmath řetězce na int
+(`assertWithinRange`, `MoneyOverflow`). Existuje cesta, kudy hodnota projde
+do databáze bez kontroly? Sedí kontrola i pro záporné hodnoty a pro součty
+jednotlivě platných položek?
+
+### 4.7 ARES a zakládání kontaktů (nejnovější část, nejméně „usazená")
 `App\Domain\Ares`, `App\Domain\Contacts`. Klíčové:
 - Nesmí být závislost — výpadek registru nesmí zablokovat zaevidování faktury.
 - `SupplierResolver` find-or-create podle IČO: nevznikají duplicity?
@@ -152,10 +187,13 @@ Content-Disposition, autorizace stažení i mazání.
 - **B2C**: odběratel bývá fyzická osoba **bez IČO** — unikátní index na IČO
   musí povolovat opakované NULL a IČO nesmí být párovacím klíčem.
 
-### 4.7 QR Platba a PDF
+### 4.8 QR Platba a PDF
 `SpdPayload` (formát SPD 1.0), `CzechIban` (mod-97), `InvoicePdfDataFactory`.
 Formátování částky bez floatu, escapování zprávy, chování bez bankovního
 účtu. U PDF: renderuje se vystavená faktura ze snapshotů, ne z živých dat?
+Odpovídá QR stavu dokladu a zbývající částce (tabulka
+v `docs/INVOICE_LIFECYCLE.md`)? Používá historický doklad snapshot loga
+a respektuje přitom tenant izolaci?
 
 ---
 
@@ -191,23 +229,44 @@ Nálezy v těchto bodech jsou platné a užitečné — zajímá nás hlavně
 4. **Na přihlášení není rate limiting** ani 2FA, chybí audit přihlášení.
 5. **Demo data mají neplatná IČO** (12345678 neprojde mod-11) — proto je
    kontrola jen brána před ARESem, viz výše.
-6. **Souběh není otestovaný reálně** — SQLite v testech zámky ignoruje.
-7. **Neměnnost faktury vynucuje aplikace, ne databáze.**
-8. Aplikace **není certifikovaný účetní software**; formální náležitosti
+6. **Neměnnost faktury vynucuje aplikace, ne databáze.**
+7. Aplikace **není certifikovaný účetní software**; formální náležitosti
    dokladů (přenesená daňová povinnost, OSS, zahraniční odběratelé) neřeší.
 
 ---
 
 ## 7. Historie review
 
-Kód už prošel jedním adversariálním review (commit `0016c4c`), které našlo
-kritickou díru v izolaci organizací popsanou v 4.1. **Neberte to jako důkaz,
-že oblast je čistá** — spíš jako signál, že v ní chyby vznikají.
+Kód prošel dvěma koly nezávislého review. **Neberte opravené oblasti jako
+důkaz, že jsou čisté** — spíš jako signál, že v nich chyby vznikají.
 
-Během ručního průchodu aplikací se navíc ukázalo, že testy nezachytily chybu
-v mapování snapshotu (PDF vystavené faktury končilo chybou 500, commit
-`01a7cec`). Stojí za to hledat další místa, kde testy testují doménu, ale
-ne skutečný HTTP průchod.
+### Kolo 1
+Adversariální review našlo kritickou díru v izolaci organizací
+(`SubstituteBindings` běžel před tenant middlewarem). Opraveno v `0016c4c`.
+Ruční průchod navíc odhalil chybu v mapování snapshotu, kterou testy
+nezachytily (PDF vystavené faktury končilo chybou 500, `01a7cec`).
+
+### Kolo 2 — devět nálezů, všechny opravené
+
+| # | Nález | Oprava | Regresní test |
+|---|---|---|---|
+| 1 | Zastaralá instance mohla změnit i smazat vystavenou fakturu | mutace přes zamčený řádek; guard čte stav z DB | `StaleInvoiceInstanceTest` |
+| 2 | Obecný veřejný escape hatch `allowLifecycleTransition()` | odstraněn; úzce vymezené operace s whitelistem | `StaleInvoiceInstanceTest` |
+| 3 | Vystavení a platby nebyly serializované | `lockForUpdate()` před kontrolou stavu i výpočtem částky | `tests/Concurrency` (MariaDB) |
+| 4 | QR znělo na celkovou částku i u uhrazené faktury | QR podle stavu, na zbývající částku; stavové štítky v PDF | `InvoicePdfStateTest` |
+| 5 | Párování zákazníka bralo první kontakt podle e-mailu | striktní pořadí klíčů, ambiguita → výjimka | `CustomerResolverTest` |
+| 6 | Šlo vystavit nulovou i zápornou fakturu | kontrola kladného součtu před spotřebováním čísla | `InvoiceTotalGuardTest` |
+| 7 | `Money` saturovala na `PHP_INT_MAX` | kontrola rozsahu před castem, `MoneyOverflow` | `MoneyOverflowTest` |
+| 8 | Audit bral organizaci z ambientního contextu | odvození ze subjektu, fail closed při neshodě | `AuditTenantTest` |
+| 9 | Historické PDF četlo aktuální logo organizace | snapshot loga při vystavení | `InvoicePdfStateTest` |
+
+U každého bylo ověřeno, že test **bez opravy selže** (dočasným vrácením
+změny). Nejnázornější doklady: bez zámku skončí souběžné platby 4 000 + 3 000
+na `paid_amount_minor` = 3 000 a souběh vystavení a smazání vystavenou
+fakturu odstraní; bez kontroly rozsahu se uloží `9223372036854775807`.
+
+**Kde hledat dál:** oblasti kolem oprav (nové cesty, které vzor obcházejí),
+a místa, kde testy ověřují doménu, ale ne skutečný HTTP průchod.
 
 ---
 
@@ -244,5 +303,6 @@ a upozornění na **chybějící test kritického chování**.
 | Větev | `feature/invoicing-mvp-foundation` (do `main` nic nemergováno) |
 | Poslední commit | `b006b6a` |
 | Verzovaných souborů | 199 (bez `vendor/`) |
-| Testy | 202 testů / 446 asercí, všechny procházejí |
-| Migrace | 18 (z toho 3 skeletonové Laravelu) |
+| Testy (SQLite) | `composer test` — 252 testů / 583 asercí |
+| Testy souběhu (MariaDB) | `composer test:concurrency` — 5 testů / 17 asercí |
+| Migrace | 19 (z toho 3 skeletonové Laravelu) |
