@@ -216,6 +216,20 @@
         border-bottom: 1px solid #eeeeee;
     }
 
+    .status-banner {
+        margin-top: 6px;
+        display: inline-block;
+        border: 1.5pt solid #000;
+        padding: 2pt 8pt;
+        font-size: 11pt;
+        font-weight: bold;
+        letter-spacing: 1pt;
+    }
+
+    .payment-state {
+        margin-bottom: 4pt;
+    }
+
     .grand-total {
         margin-top: 2mm;
         background-color: #1a1a1a;
@@ -278,6 +292,9 @@
                 <h1>FAKTURA č. {{ $data->invoiceNumber }}</h1>
                 @if ($data->vatPayer)
                     <div class="subtitle">Daňový doklad</div>
+                @endif
+                @if ($data->statusBanner())
+                    <div class="status-banner">{{ $data->statusBanner() }}</div>
                 @endif
             @endif
         </td>
@@ -464,10 +481,36 @@
                     </tbody>
                 </table>
             @endif
+            @if ($data->isPartiallyPaid() || $data->isPaid())
+                <table class="totals-table payment-state">
+                    <tr>
+                        <td class="key">Celková částka</td>
+                        <td class="num">{{ $data->total->formatCzech() }}</td>
+                    </tr>
+                    <tr>
+                        <td class="key">Uhrazeno</td>
+                        <td class="num">{{ $data->paidAmount?->formatCzech() }}</td>
+                    </tr>
+                    @if ($data->isPartiallyPaid())
+                        <tr>
+                            <td class="key">Zbývá uhradit</td>
+                            <td class="num">{{ $data->amountDue()->formatCzech() }}</td>
+                        </tr>
+                    @endif
+                </table>
+            @endif
             <table class="grand-total">
                 <tr>
-                    <td>Celkem k úhradě</td>
-                    <td class="num">{{ $data->total->formatCzech() }}</td>
+                    <td>{{ $data->totalLabel() }}</td>
+                    <td class="num">
+                        {{-- Uhrazená ani stornovaná faktura nesmí tvrdit,
+                             že je původní obnos stále splatný. --}}
+                        @if ($data->isPaid() || $data->isCancelled())
+                            {{ $data->total->formatCzech() }}
+                        @else
+                            {{ $data->amountDue()->formatCzech() }}
+                        @endif
+                    </td>
                 </tr>
             </table>
         </td>

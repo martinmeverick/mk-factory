@@ -39,11 +39,64 @@ final readonly class InvoicePdfData
         public ?string $footerText,
         public ?string $logoDataUri,
         public ?string $qrDataUri,
+        public string $status = 'draft',
+        public ?Money $paidAmount = null,
+        public ?Money $remainingAmount = null,
     ) {
     }
 
     public function isDraft(): bool
     {
         return $this->invoiceNumber === null;
+    }
+
+    public function isCancelled(): bool
+    {
+        return $this->status === 'cancelled';
+    }
+
+    public function isPaid(): bool
+    {
+        return $this->status === 'paid';
+    }
+
+    public function isPartiallyPaid(): bool
+    {
+        return $this->status === 'partially_paid';
+    }
+
+    /**
+     * Zbývá-li něco uhradit, je to částka k zaplacení; jinak nula.
+     */
+    public function amountDue(): Money
+    {
+        return $this->remainingAmount ?? $this->total;
+    }
+
+    /**
+     * Popisek u výsledné částky. U uhrazené či stornované faktury nesmí
+     * tvrdit, že je původní obnos stále splatný.
+     */
+    public function totalLabel(): string
+    {
+        return match (true) {
+            $this->isCancelled() => 'Celkem (doklad stornován)',
+            $this->isPaid() => 'Celkem (uhrazeno)',
+            $this->isPartiallyPaid() => 'Zbývá k úhradě',
+            default => 'Celkem k úhradě',
+        };
+    }
+
+    /**
+     * Výrazný stavový štítek do hlavičky dokladu; null = nic se nezobrazuje.
+     */
+    public function statusBanner(): ?string
+    {
+        return match ($this->status) {
+            'cancelled' => 'STORNOVÁNO',
+            'paid' => 'UHRAZENO',
+            'partially_paid' => 'ČÁSTEČNĚ UHRAZENO',
+            default => null,
+        };
     }
 }
