@@ -9,9 +9,20 @@ use InvalidArgumentException;
 /**
  * Immutable peněžní hodnota v celočíselných minor jednotkách (haléře).
  * Veškerá aritmetika přes bcmath / celá čísla — nikdy float.
+ *
+ * Každý převod bcmath řetězce na PHP int prochází kontrolou rozsahu
+ * (viz assertWithinRange). Bez ní by `(int)` saturoval na PHP_INT_MAX
+ * a do databáze by se uložila nesmyslná částka místo chyby.
  */
 final class Money implements \JsonSerializable, \Stringable
 {
+    /**
+     * Horní mez haléřů — signed BIGINT i PHP int mají stejné maximum.
+     */
+    public const string MAX_MINOR = '9223372036854775807';
+
+    public const string MIN_MINOR = '-9223372036854775808';
+
     private function __construct(
         private readonly int $minor,
         private readonly string $currency,
@@ -25,6 +36,8 @@ final class Money implements \JsonSerializable, \Stringable
 
     /**
      * Přijímá '1234.56' i '1234,56' (max 2 desetinná místa).
+     *
+     * @throws MoneyOverflow když se částka nevejde do rozsahu
      */
     public static function fromDecimalString(string $amount, string $currency = 'CZK'): self
     {
@@ -36,9 +49,15 @@ final class Money implements \JsonSerializable, \Stringable
 
         $negative = str_starts_with($normalized, '-');
         [$units, $cents] = array_pad(explode('.', ltrim($normalized, '-'), 2), 2, '0');
-        $minor = ((int) $units) * 100 + (int) str_pad($cents, 2, '0');
 
-        return new self($negative ? -$minor : $minor, strtoupper($currency));
+        // bcmath, ne (int) — '9999999999999999999' by se jinak ořízlo.
+        $minorDecimal = bcadd(bcmul($units, '100', 0), str_pad($cents, 2, '0'), 0);
+
+        if ($negative) {
+            $minorDecimal = '-'.$minorDecimal;
+        }
+
+        return new self(self::toIntChecked($minorDecimal, 'převod částky'), strtoupper($currency));
     }
 
     public static function zero(string $currency = 'CZK'): self
@@ -46,22 +65,34 @@ final class Money implements \JsonSerializable, \Stringable
         return new self(0, strtoupper($currency));
     }
 
+    /**
+     * @throws MoneyOverflow když součet přeteče rozsah
+     */
     public function plus(self $other): self
     {
         $this->assertSameCurrency($other);
 
-        return new self($this->minor + $other->minor, $this->currency);
+        $sum = bcadd((string) $this->minor, (string) $other->minor, 0);
+
+        return new self(self::toIntChecked($sum, 'součet'), $this->currency);
     }
 
+    /**
+     * @throws MoneyOverflow když rozdíl přeteče rozsah
+     */
     public function minus(self $other): self
     {
         $this->assertSameCurrency($other);
 
-        return new self($this->minor - $other->minor, $this->currency);
+        $difference = bcsub((string) $this->minor, (string) $other->minor, 0);
+
+        return new self(self::toIntChecked($difference, 'rozdíl'), $this->currency);
     }
 
     /**
      * Vynásobí desetinným množstvím (např. '2.500'), half-up na celé haléře.
+     *
+     * @throws MoneyOverflow když součin přeteče rozsah
      */
     public function multiplyBy(string $decimalQuantity): self
     {
@@ -73,11 +104,13 @@ final class Money implements \JsonSerializable, \Stringable
 
         $product = bcmul((string) $this->minor, $qty, 6);
 
-        return new self(self::roundHalfUpToInt($product), $this->currency);
+        return new self(self::roundHalfUpToInt($product, 'součin množství a ceny'), $this->currency);
     }
 
     /**
      * Procentní část (např. sazba DPH '21.00'), half-up na celé haléře.
+     *
+     * @throws MoneyOverflow když výsledek přeteče rozsah
      */
     public function percentage(string $rate): self
     {
@@ -89,7 +122,22 @@ final class Money implements \JsonSerializable, \Stringable
 
         $product = bcdiv(bcmul((string) $this->minor, $rate, 6), '100', 6);
 
-        return new self(self::roundHalfUpToInt($product), $this->currency);
+        return new self(self::roundHalfUpToInt($product, 'výpočet DPH'), $this->currency);
+    }
+
+    /**
+     * Ověří, že desetinný řetězec haléřů leží v podporovaném rozsahu.
+     * Volá se PŘED castem na int — to je celý smysl.
+     *
+     * @throws MoneyOverflow
+     */
+    public static function assertWithinRange(string $decimalMinor, string $operation = 'hodnota'): void
+    {
+        $whole = self::truncateToWhole($decimalMinor);
+
+        if (bccomp($whole, self::MAX_MINOR, 0) > 0 || bccomp($whole, self::MIN_MINOR, 0) < 0) {
+            throw MoneyOverflow::forValue($whole, $operation);
+        }
     }
 
     public function isZero(): bool
@@ -168,12 +216,38 @@ final class Money implements \JsonSerializable, \Stringable
     }
 
     /**
-     * Half-up (od nuly) zaokrouhlení bcmath řetězce na celé číslo.
+     * Half-up (od nuly) zaokrouhlení bcmath řetězce na celé číslo,
+     * s kontrolou rozsahu před castem.
+     *
+     * @throws MoneyOverflow
      */
-    private static function roundHalfUpToInt(string $decimal): int
+    private static function roundHalfUpToInt(string $decimal, string $operation): int
     {
         $adjusted = bcadd($decimal, str_starts_with($decimal, '-') ? '-0.5' : '0.5', 6);
 
-        return (int) bcdiv($adjusted, '1', 0);
+        return self::toIntChecked(bcdiv($adjusted, '1', 0), $operation);
+    }
+
+    /**
+     * Jediné místo, kde se bcmath řetězec převádí na int — vždy po kontrole.
+     *
+     * @throws MoneyOverflow
+     */
+    private static function toIntChecked(string $decimalMinor, string $operation): int
+    {
+        self::assertWithinRange($decimalMinor, $operation);
+
+        return (int) self::truncateToWhole($decimalMinor);
+    }
+
+    /**
+     * Odřízne desetinnou část bez zaokrouhlení (bcmath řetězce mohou mít
+     * scale i po bcdiv se scale 0 na některých platformách).
+     */
+    private static function truncateToWhole(string $decimal): string
+    {
+        $position = strpos($decimal, '.');
+
+        return $position === false ? $decimal : substr($decimal, 0, $position);
     }
 }
