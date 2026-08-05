@@ -3,7 +3,12 @@
     "name": "mkfactory/mk-factory",
     "type": "project",
     "description": "MK Factory — modulární fakturační systém (vydané a přijaté faktury, PDF, QR Platba).",
-    "keywords": ["fakturace", "invoicing", "qr-platba", "laravel"],
+    "keywords": [
+        "fakturace",
+        "invoicing",
+        "qr-platba",
+        "laravel"
+    ],
     "license": "proprietary",
     "require": {
         "php": "^8.3",
@@ -67,6 +72,10 @@
         ],
         "pre-package-uninstall": [
             "Illuminate\\Foundation\\ComposerScripts::prePackageUninstall"
+        ],
+        "test:concurrency": [
+            "@php artisan config:clear --ansi",
+            "@php vendor/bin/phpunit -c phpunit.concurrency.xml"
         ]
     },
     "extra": {
