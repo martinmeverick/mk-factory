@@ -35,4 +35,19 @@ return [
         ],
     ],
 
+    /*
+    | ARES — veřejný registr ekonomických subjektů (MF ČR). Bez klíče
+    | a registrace. Slouží jen k předvyplnění údajů; aplikace na něm
+    | nesmí být závislá (viz docs/ARES_INTEGRATION.md).
+    */
+    'ares' => [
+        'enabled' => (bool) env('ARES_ENABLED', true),
+        'base_uri' => env('ARES_BASE_URI', 'https://ares.gov.cz/ekonomicke-subjekty-v-be/rest'),
+        'timeout' => (int) env('ARES_TIMEOUT', 5),
+        'connect_timeout' => (int) env('ARES_CONNECT_TIMEOUT', 3),
+        // Registr se mění zřídka; cache výrazně snižuje počet dotazů.
+        'cache_ttl' => (int) env('ARES_CACHE_TTL', 86400),
+        'missing_cache_ttl' => (int) env('ARES_MISSING_CACHE_TTL', 900),
+    ],
+
 ];

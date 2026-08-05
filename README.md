@@ -75,6 +75,12 @@ není potřeba.
 - Logo organizace a přílohy přijatých faktur: `storage/app/private/`
   (privátní disk, mimo webroot).
 
+## Externí služby
+
+Aplikace volá veřejné API registru **ARES** (MF ČR) pro předvyplnění údajů
+firem podle IČO — bez klíče a registrace. Je to jen pomůcka: při výpadku
+registru lze vše zadat ručně. Vypnout jde přes `ARES_ENABLED=false`.
+
 ## Omezení MVP
 
 - Jen CZK, jedna jazyková verze (čeština).
@@ -92,6 +98,7 @@ není potřeba.
 | docs/DATA_MODEL.md | schéma databáze |
 | docs/INVOICE_LIFECYCLE.md | stavy faktur, neměnnost, číslování |
 | docs/PDF_AND_QR.md | volba knihoven, SPD, fonty |
-| docs/INTEGRATION_CONTRACT.md | návrh budoucího REST API |
+| docs/ARES_INTEGRATION.md | načítání firem z ARESu, zakládání kontaktů |
+| docs/INTEGRATION_CONTRACT.md | návrh budoucího REST API, napojení U Jabka |
 | docs/SECURITY_NOTES.md | bezpečnostní model a známá omezení |
 | docs/FUTURE_BACKLOG.md | odložené funkce |

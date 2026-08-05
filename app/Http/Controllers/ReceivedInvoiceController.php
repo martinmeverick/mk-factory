@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Contacts\SupplierNotResolvable;
+use App\Domain\Contacts\SupplierResolver;
 use App\Domain\Invoicing\InvalidStateTransition;
 use App\Domain\Invoicing\ReceivedInvoiceLifecycle;
 use App\Domain\Money\Money;
@@ -17,12 +19,14 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class ReceivedInvoiceController extends Controller
 {
     public function __construct(
         private readonly ReceivedInvoiceLifecycle $lifecycle,
+        private readonly SupplierResolver $supplierResolver,
     ) {
     }
 
@@ -149,7 +153,7 @@ class ReceivedInvoiceController extends Controller
     private function data(ReceivedInvoiceRequest $request): array
     {
         return [
-            'contact_id' => $request->validated('contact_id'),
+            'contact_id' => $this->resolveSupplierId($request),
             'project_id' => $request->validated('project_id'),
             'supplier_invoice_number' => $request->validated('supplier_invoice_number'),
             'variable_symbol' => $request->validated('variable_symbol'),
@@ -163,6 +167,26 @@ class ReceivedInvoiceController extends Controller
             'currency' => 'CZK',
             'note' => $request->validated('note'),
         ];
+    }
+
+    /**
+     * Dodavatel buď vybraný ze seznamu, nebo dohledaný/založený podle IČO.
+     * Doménovou chybu překládá na chybu formuláře u pole IČO.
+     */
+    private function resolveSupplierId(ReceivedInvoiceRequest $request): int
+    {
+        if ($request->validated('supplier_mode') === 'existing') {
+            return (int) $request->validated('contact_id');
+        }
+
+        try {
+            return $this->supplierResolver->resolveByIco(
+                (string) $request->validated('supplier_ico'),
+                $request->validated('supplier_name'),
+            )->id;
+        } catch (SupplierNotResolvable $e) {
+            throw ValidationException::withMessages(['supplier_ico' => $e->getMessage()]);
+        }
     }
 
     /**
