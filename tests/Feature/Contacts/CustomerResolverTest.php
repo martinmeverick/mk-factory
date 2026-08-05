@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature\Contacts;
 
+use App\Domain\Contacts\AmbiguousCustomerMatch;
 use App\Domain\Contacts\CustomerResolver;
 use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\ContactType;
@@ -116,7 +117,12 @@ class CustomerResolverTest extends TestCase
         $this->assertSame($existing->id, $again->id);
     }
 
-    public function test_backfills_external_id_on_known_customer(): void
+    /**
+     * NÁLEZ 5: external_id je nejsilnější klíč. Když pod ním kontakt
+     * neexistuje, NESMÍ se párování „zachránit“ e-mailem — jinak by nová
+     * identita tiše splynula se starým kontaktem.
+     */
+    public function test_new_external_id_with_known_email_creates_a_separate_identity(): void
     {
         $existing = Contact::factory()->create([
             'organization_id' => $this->organization->id,
@@ -127,13 +133,88 @@ class CustomerResolverTest extends TestCase
         ]);
 
         $contact = $this->resolver->resolve([
-            'name' => 'Petr Dvořák',
+            'name' => 'Petr Dvořák mladší',
             'email' => 'petr@example.test',
             'external_id' => 'ujabka-cust-7',
         ]);
 
-        $this->assertSame($existing->id, $contact->id);
-        $this->assertSame('ujabka-cust-7', $contact->fresh()->external_id);
+        $this->assertNotSame($existing->id, $contact->id, 'Nesmí vrátit starý kontakt.');
+        $this->assertSame('ujabka-cust-7', $contact->external_id);
+        $this->assertNull($existing->fresh()->external_id, 'Starému kontaktu se cizí klíč nedopisuje.');
+        $this->assertSame(2, Contact::query()->count());
+    }
+
+    /**
+     * NÁLEZ 5: dva kontakty se stejným e-mailem nesmí vést k výběru
+     * prvního řádku podle pořadí v databázi.
+     */
+    public function test_duplicate_email_is_rejected_instead_of_picking_the_first_row(): void
+    {
+        Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'name' => 'Rodina Nováková — matka',
+            'email' => 'rodina@example.test',
+            'external_id' => null,
+            'ico' => null,
+        ]);
+        Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'name' => 'Rodina Nováková — otec',
+            'email' => 'rodina@example.test',
+            'external_id' => null,
+            'ico' => null,
+        ]);
+
+        $this->expectException(AmbiguousCustomerMatch::class);
+
+        $this->resolver->resolve([
+            'name' => 'Kdokoli',
+            'email' => 'rodina@example.test',
+        ]);
+    }
+
+    /**
+     * NÁLEZ 5: dodané external_id se nikdy nezachraňuje e-mailem ani IČEM.
+     */
+    public function test_external_id_lookup_never_falls_back_to_email(): void
+    {
+        $byEmail = Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'ico' => null,
+            'email' => 'firma@example.test',
+            'external_id' => null,
+        ]);
+
+        $contact = $this->resolver->resolve([
+            'name' => 'Nová pobočka',
+            'external_id' => 'ujabka-branch-2',
+            'email' => 'firma@example.test',
+        ]);
+
+        $this->assertNotSame($byEmail->id, $contact->id);
+        $this->assertSame('ujabka-branch-2', $contact->external_id);
+    }
+
+    /**
+     * NÁLEZ 5: konflikt „nové external_id + už obsazené IČO“ se hlásí
+     * srozumitelnou doménovou chybou, ne pádem na databázovém indexu
+     * a už vůbec ne tichým sloučením dvou identit.
+     */
+    public function test_conflicting_ico_with_new_external_id_is_reported(): void
+    {
+        Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'ico' => '00177041',
+            'external_id' => 'ujabka-branch-1',
+        ]);
+
+        $this->expectException(AmbiguousCustomerMatch::class);
+
+        $this->resolver->resolve([
+            'name' => 'Nová pobočka',
+            'external_id' => 'ujabka-branch-2',
+            'ico' => '00177041',
+        ]);
     }
 
     public function test_promotes_supplier_to_both_when_ordering(): void

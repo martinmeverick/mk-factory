@@ -13,14 +13,17 @@ use Illuminate\Database\UniqueConstraintViolationException;
  * systému (U Jabka a další). Na rozdíl od dodavatelů jde převážně o B2C —
  * fyzické osoby BEZ IČO, takže IČO nesmí být párovacím klíčem.
  *
- * Pořadí párování:
- *   1. external_id — jediný spolehlivý klíč, unikátní v rámci organizace,
- *   2. IČO — jen když ho zákazník má (firemní objednávka),
- *   3. e-mail — poslední záchrana pro objednávky bez external_id,
- *   4. založení nového kontaktu.
+ * Pořadí párování je striktní — slabší klíč NIKDY nezachraňuje neúspěch
+ * silnějšího:
+ *   1. external_id — je-li dodán, rozhoduje výhradně on,
+ *   2. IČO — jen bez external_id,
+ *   3. e-mail — jen bez external_id i IČA a jen při právě jedné shodě,
+ *   4. jinak se založí nový kontakt.
  *
  * E-mail se schválně NEVYNUCUJE jako unikátní: jednu adresu může sdílet víc
  * osob (domácnost, firma) a tvrdá unikátnost by legitimní objednávky rozbila.
+ * Při více shodách se proto vyhodí AmbiguousCustomerMatch — přiřadit fakturu
+ * náhodné osobě podle pořadí v databázi je nepřípustné.
  */
 final class CustomerResolver
 {
@@ -36,7 +39,7 @@ final class CustomerResolver
         $existing = $this->findExisting($externalId, $ico, $email);
 
         if ($existing !== null) {
-            return $this->ensureUsableAsCustomer($existing, $externalId);
+            return $this->ensureUsableAsCustomer($existing);
         }
 
         $attributes = [
@@ -59,57 +62,72 @@ final class CustomerResolver
             // Souběžné objednávky téhož zákazníka — vyhrál druhý zápis.
             $contact = $this->findExisting($externalId, $ico, $email);
 
-            if ($contact === null) {
-                throw $e;
+            if ($contact !== null) {
+                return $this->ensureUsableAsCustomer($contact);
             }
 
-            return $this->ensureUsableAsCustomer($contact, $externalId);
+            // Nové external_id, ale IČO už drží jiný kontakt: identity
+            // nesloučíme odhadem, jen srozumitelně nahlásíme konflikt.
+            if ($externalId !== null && $ico !== null) {
+                throw AmbiguousCustomerMatch::forConflictingIco($ico, $externalId);
+            }
+
+            throw $e;
         }
     }
 
+    /**
+     * Párovací pořadí je striktní a NEPADÁ zpět na slabší klíč:
+     *
+     * 1. external_id — je-li dodán, hledá se VÝHRADNĚ podle něj. Když nic
+     *    nenajde, zakládá se nový kontakt; „záchrana“ e-mailem ani IČEM by
+     *    novou identitu chybně slepila se starým kontaktem.
+     * 2. IČO — jen bez external_id.
+     * 3. e-mail — jen bez external_id i bez použitelného IČO, a jen když
+     *    odpovídá právě jednomu kontaktu.
+     *
+     * Všechny dotazy jdou přes tenant-scoped Contact::query().
+     *
+     * @throws AmbiguousCustomerMatch
+     */
     private function findExisting(?string $externalId, ?string $ico, ?string $email): ?Contact
     {
         if ($externalId !== null) {
-            $byExternalId = Contact::query()->where('external_id', $externalId)->first();
-
-            if ($byExternalId !== null) {
-                return $byExternalId;
-            }
+            return Contact::query()->where('external_id', $externalId)->first();
         }
 
         if ($ico !== null) {
-            $byIco = Contact::query()->where('ico', $ico)->first();
-
-            if ($byIco !== null) {
-                return $byIco;
-            }
+            return Contact::query()->where('ico', $ico)->first();
         }
 
         if ($email !== null) {
-            return Contact::query()->where('email', $email)->first();
+            $matches = Contact::query()->where('email', $email)->limit(2)->get();
+
+            if ($matches->count() > 1) {
+                throw AmbiguousCustomerMatch::forEmail(
+                    $email,
+                    Contact::query()->where('email', $email)->count(),
+                );
+            }
+
+            return $matches->first();
         }
 
         return null;
     }
 
     /**
-     * Dodavatele použitého nově i jako odběratel povýší na „obojí“ a doplní
-     * chybějící external_id, aby další objednávky párovaly na první klíč.
+     * Dodavatele použitého nově i jako odběratel povýší na „obojí“.
+     *
+     * external_id se zde záměrně NEDOPLŇUJE: shoda podle e-mailu nebo IČA
+     * nastane jen tehdy, když volající external_id vůbec nedodal, a shoda
+     * podle external_id ho už mít musí. Dopisovat cizí klíč na kontakt
+     * nalezený slabším klíčem by tiše slepilo dvě různé identity.
      */
-    private function ensureUsableAsCustomer(Contact $contact, ?string $externalId): Contact
+    private function ensureUsableAsCustomer(Contact $contact): Contact
     {
-        $changes = [];
-
         if ($contact->type === ContactType::Supplier) {
-            $changes['type'] = ContactType::Both;
-        }
-
-        if ($externalId !== null && $contact->external_id === null) {
-            $changes['external_id'] = $externalId;
-        }
-
-        if ($changes !== []) {
-            $contact->update($changes);
+            $contact->update(['type' => ContactType::Both]);
         }
 
         return $contact;
