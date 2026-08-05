@@ -93,6 +93,7 @@ registru lze vše zadat ručně. Vypnout jde přes `ARES_ENABLED=false`.
 
 | Soubor | Obsah |
 |---|---|
+| docs/REVIEW_BRIEF.md | **podklad pro nezávislé review** (samostatný, pro externího recenzenta) |
 | docs/PRODUCT_SCOPE.md | rozsah a ohrady produktu |
 | docs/ARCHITECTURE.md | vrstvy, tenancy, peníze, kontrakty služeb |
 | docs/DATA_MODEL.md | schéma databáze |
