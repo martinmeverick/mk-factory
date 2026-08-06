@@ -177,10 +177,9 @@ final class Money implements \JsonSerializable, \Stringable
      */
     public function toDecimalString(): string
     {
-        $abs = abs($this->minor);
-        $sign = $this->minor < 0 ? '-' : '';
+        [$negative, $units, $cents] = $this->decimalParts();
 
-        return sprintf('%s%d.%02d', $sign, intdiv($abs, 100), $abs % 100);
+        return sprintf('%s%s.%s', $negative ? '-' : '', $units, $cents);
     }
 
     /**
@@ -188,12 +187,16 @@ final class Money implements \JsonSerializable, \Stringable
      */
     public function formatCzech(): string
     {
-        $abs = abs($this->minor);
-        $sign = $this->minor < 0 ? '−' : '';
-        $units = number_format(intdiv($abs, 100), 0, ',', "\u{A0}");
+        [$negative, $units, $cents] = $this->decimalParts();
         $symbol = $this->currency === 'CZK' ? 'Kč' : $this->currency;
 
-        return sprintf("%s%s,%02d\u{A0}%s", $sign, $units, $abs % 100, $symbol);
+        return sprintf(
+            "%s%s,%s\u{A0}%s",
+            $negative ? '−' : '',
+            self::groupThousands($units),
+            $cents,
+            $symbol,
+        );
     }
 
     public function jsonSerialize(): array
@@ -204,6 +207,40 @@ final class Money implements \JsonSerializable, \Stringable
     public function __toString(): string
     {
         return $this->formatCzech();
+    }
+
+    /**
+     * Rozklad na znaménko, celé jednotky a dvouciferné haléře ČISTĚ přes
+     * řetězce. `abs()`/`intdiv()` tu nesmí být: abs(PHP_INT_MIN) se do int
+     * nevejde, přeteče do floatu a formátování skončí chybou nebo
+     * scientific notation.
+     *
+     * @return array{0: bool, 1: string, 2: string}
+     */
+    private function decimalParts(): array
+    {
+        $minor = (string) $this->minor;
+        $negative = str_starts_with($minor, '-');
+        $digits = str_pad(ltrim($minor, '-'), 3, '0', STR_PAD_LEFT);
+
+        return [$negative, substr($digits, 0, -2), substr($digits, -2)];
+    }
+
+    /**
+     * Tisícové skupiny zprava, oddělené nezlomitelnou mezerou. Vlastní
+     * implementace místo number_format(): ta bere int/float a na hraně
+     * rozsahu by vyžadovala právě ten převod, kterému se vyhýbáme.
+     */
+    private static function groupThousands(string $digits): string
+    {
+        $groups = [];
+
+        for ($end = strlen($digits); $end > 0; $end -= 3) {
+            $start = max(0, $end - 3);
+            array_unshift($groups, substr($digits, $start, $end - $start));
+        }
+
+        return implode("\u{A0}", $groups);
     }
 
     private function assertSameCurrency(self $other): void
