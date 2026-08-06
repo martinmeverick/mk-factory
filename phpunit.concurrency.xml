@@ -7,6 +7,12 @@
     Tyto testy proto NESMÍ být součástí rychlé sady a nesmí se vydávat
     za ověřené, pokud běžely jen na SQLite.
 
+    POZOR: sada volá `migrate:fresh`, tedy ZAHODÍ celé schéma. DB_* hodnoty
+    jsou proto force="true" — bez toho by je přebila proměnná prostředí
+    shellu nebo CI a destruktivní operace by dopadla na cizí databázi.
+    XML je ale konfigurace, ne bezpečnostní hranice: druhou (povinnou)
+    kontrolu dělá Tests\Concurrency\ConcurrencyDatabaseGuard v PHP.
+
     Spuštění: composer test:concurrency
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -20,19 +26,19 @@
         </testsuite>
     </testsuites>
     <php>
-        <env name="APP_ENV" value="testing"/>
+        <env name="APP_ENV" value="testing" force="true"/>
         <env name="APP_MAINTENANCE_DRIVER" value="file"/>
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
-        <!-- Skutečná MariaDB, ne SQLite. -->
-        <env name="DB_CONNECTION" value="mysql"/>
-        <env name="DB_HOST" value="127.0.0.1"/>
-        <env name="DB_PORT" value="3306"/>
-        <env name="DB_DATABASE" value="mk_factory_test"/>
-        <env name="DB_USERNAME" value="root"/>
-        <env name="DB_PASSWORD" value=""/>
-        <env name="DB_URL" value=""/>
+        <!-- Skutečná MariaDB, ne SQLite. Vynuceno — viz komentář výše. -->
+        <env name="DB_CONNECTION" value="mysql" force="true"/>
+        <env name="DB_HOST" value="127.0.0.1" force="true"/>
+        <env name="DB_PORT" value="3306" force="true"/>
+        <env name="DB_DATABASE" value="mk_factory_test" force="true"/>
+        <env name="DB_USERNAME" value="root" force="true"/>
+        <env name="DB_PASSWORD" value="" force="true"/>
+        <env name="DB_URL" value="" force="true"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>
