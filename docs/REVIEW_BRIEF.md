@@ -14,7 +14,7 @@ základních funkcí iDokladu) pro firmu, která ho bude používat napříč n�
 projekty. První reálné nasazení: projekt **U Jabka**; dále mk-systems,
 Simona Vojtěšková, MEX, Cashflow.
 
-Stav: **MVP foundation po třech kolech nezávislého review** —
+Stav: **MVP foundation po čtyřech kolech nezávislého review** —
 funkční vertikální průřez organizace → odběratel → faktura → vystavení →
 PDF → QR platba, plus přijaté faktury, projekty, dashboard a napojení na
 registr ARES.
@@ -292,6 +292,34 @@ bylo ověřeno, že bez opravy selže:
 | Snapshot loga: ignorovaný výsledek `put()`, žádná kompenzace po rollbacku | ověřený zápis (`LogoSnapshotFailed`), kompenzační `discard()` po rollbacku, přiznané failure window | `LogoSnapshotConsistencyTest` |
 | `abs(PHP_INT_MIN)` přetékalo do floatu při formátování | `toDecimalString()`/`formatCzech()` čistě přes řetězce | `MoneyBoundaryFormattingTest` |
 
+### Kolo 4 — re-review oprav kola 3 (8 nových nálezů, všechny uzavřené)
+
+Re-review potvrdilo jádro oprav (interní zápis přes `Closure::bind`,
+Eloquent guardy, peněžní hranice), ale našlo osm konkrétních děr na jejich
+okrajích. Všechny jsou opravené a mají regresní test ověřený dočasným
+vrácením opravy:
+
+| # | Nález | Oprava | Regresní test |
+|---|---|---|---|
+| 1 | `migrate:fresh` mohl dopadnout na databázi podstrčenou proměnnou prostředí | `force="true"` v XML **plus** povinný `ConcurrencyDatabaseGuard` (driver, config vs. `SELECT DATABASE()`, allowlist, denylist, opt-in) | `ConcurrencyDatabaseGuardTest`, `ConcurrencyDatabaseGuardNameRulesTest` |
+| 2 | `updateDraft()` přijal tenantově cizí `contact_id`/`project_id`/`bank_account_id`/`number_series_id` | ověření každé reference proti `organization_id` zamčené faktury před jakýmkoli zápisem | `DraftReferenceOwnershipTest` |
+| 3 | Změnou parent ID šlo odpojit položku nebo přílohu od finálního dokladu | vlastnická vazba i `organization_id` potomka jsou neměnné; guard finality čte PŮVODNÍHO rodiče | `InvoiceChildOwnershipTest` |
+| 4 | Emailový `GET_LOCK` se uvnitř cizí transakce uvolnil před commitem | email-only větev uvnitř transakce fail-closed odmítne (`CustomerResolutionNotTransactional`); timeout má doménový typ | `CustomerResolverConcurrencyTest` (MariaDB) |
+| 5 | Stav `rejected` nebyl všude finální (šlo smazat fakturu i měnit přílohy) | jediný zdroj pravdy `FINAL_STATUSES` + `isFinal()` napříč modelem, lifecycle, guardy, controllerem a šablonou | `RejectedReceivedInvoiceTest` |
+| 6 | Nakonfigurované, ale chybějící logo se tiše ignorovalo | rozlišení „logo není“ vs. „logo chybí“; druhý případ zastaví vystavení, číslo se nespotřebuje | `LogoSnapshotConsistencyTest` |
+| 7 | Odmítnutý upload nechal osiřelý soubor a vrátil HTTP 500 | upload přes lifecycle: zámek → kontrola stavu → soubor → záznam → audit, plus kompenzační úklid a kontrolovaná odpověď | `ReceivedInvoiceAttachmentUploadTest` |
+| 8 | Dvojí volání bariéry mohlo způsobit falešně zelený souběžný test | jednorázová bariéra, typované zprávy, striktní base64, odmítnutí neznámého typu | `BarrierContractTest`, `BarrierProtocolDecodingTest` |
+
+Navíc (mimo osm nálezů, stejná třída rizika): **hlavní sada** šla přes
+`DB_URL` v prostředí přesměrovat na vývojovou databázi a `composer test`
+by ji přes `RefreshDatabase` smazal. Zavřeno `force="true"` v `phpunit.xml`
+a runtime kontrolou v `Tests\TestCase`.
+
+> **Poznámka k `force="true"`:** samo o sobě NESTAČÍ. PHPUnit u `<env>`
+> zapisuje `putenv()` a `$_ENV`, ale ne `$_SERVER`, a Laravel čte `$_SERVER`
+> dřív — exportovaná proměnná se tedy k aplikaci dostane i s `force`.
+> Skutečnou brzdou jsou až kontroly v PHP. Ověřeno empiricky.
+
 **Kde hledat dál:** oblasti kolem oprav (nové cesty, které vzor obcházejí),
 a místa, kde testy ověřují doménu, ale ne skutečný HTTP průchod.
 
@@ -328,7 +356,7 @@ a upozornění na **chybějící test kritického chování**.
 | Umístění | `/Applications/XAMPP/xamppfiles/htdocs/mk-factory` |
 | Repozitář | `github.com/martinmeverick/mk-factory` (privátní) |
 | Větev | `feature/invoicing-mvp-foundation` (do `main` nic nemergováno) |
-| Stav | HEAD větve po opravách z re-review (kolo 3, viz část 7) |
-| Testy (SQLite) | `composer test` — 307 testů / 776 asercí |
-| Testy souběhu (MariaDB) | `composer test:concurrency` — 12 testů / 46 asercí, deterministická bariéra |
+| Stav | HEAD větve po opravách z re-review (kolo 4, viz část 7) |
+| Testy (SQLite) | `composer test` — 361 testů / 932 asercí |
+| Testy souběhu (MariaDB) | `composer test:concurrency` — 28 testů / ~78 asercí, deterministická jednorázová bariéra |
 | Migrace | 19 (z toho 3 skeletonové Laravelu) |

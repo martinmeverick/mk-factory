@@ -98,10 +98,39 @@ Předpoklady:
 - PHP rozšíření `pcntl` a `posix` (bez nich se testy přeskočí, ne tiše
   „projdou“).
 
-Konfigurace je v `phpunit.concurrency.xml`; sada si databázi sama migruje
-(`migrate:fresh`), takže **nepoužívejte produkční databázi** — testy běží
-výhradně proti izolované `mk_factory_test`. Co pokrývá, je popsáno
+Konfigurace je v `phpunit.concurrency.xml`. Co sada pokrývá, je popsáno
 v `docs/INVOICE_LIFECYCLE.md` (sekce Souběh).
+
+#### Která databáze se smí smazat
+
+Sada volá `migrate:fresh`, tedy **zahodí celé schéma**. Cíl je proto
+hlídaný dvakrát:
+
+1. `phpunit.concurrency.xml` má u `DB_*` hodnot `force="true"`,
+2. `Tests\Concurrency\ConcurrencyDatabaseGuard` běží v `setUp()` PŘED
+   migrací a fail-closed ověří, že: driver je MySQL/MariaDB, jméno
+   databáze v konfiguraci se shoduje se skutečným `SELECT DATABASE()`,
+   jméno je přesně `mk_factory_test` a není na denylistu vývojových
+   a systémových databází.
+
+**XML samo o sobě nestačí a nikdy nestačilo**: PHPUnit u `<env>` zapisuje
+`putenv()` a `$_ENV`, ale ne `$_SERVER` — a Laravel čte `$_SERVER` dřív.
+Exportovaná proměnná prostředí se tedy k aplikaci dostane i s `force`.
+Skutečnou brzdou je až kontrola v PHP.
+
+Jiné testovací schéma jde povolit jen výslovným opt-inem (jméno musí
+KONČIT na `_test`; „obsahuje test“ nestačí):
+
+```bash
+MKF_CONCURRENCY_DATABASE=mkf_ci_test MKF_CONCURRENCY_DATABASE_CONFIRM=ano-smaz-tuto-databazi composer test:concurrency
+```
+
+Vývojovou (`mk_factory`) ani systémovou databázi nepovolí ani opt-in.
+
+Stejnou logikou je chráněná i **hlavní sada**: přes `RefreshDatabase`
+také spouští `migrate:fresh`, takže `Tests\TestCase` odmítne běžet nad
+čímkoli jiným než SQLite in-memory. Bez toho by `DB_URL=mysql://…/mk_factory`
+udělal z obyčejného `composer test` nástroj na smazání vývojové databáze.
 
 ## Generovaná PDF a soubory
 

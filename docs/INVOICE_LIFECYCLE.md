@@ -43,6 +43,19 @@ a každý si otevírá vlastní spojení (hlídá `ForkIsolationTest`). Worker,
 který bariéru nezavolá, test shodí — překryv nikdy nestojí na náhodě
 plánovače.
 
+Bariéra je **jednorázová** a protokol **typovaný** (`READY`, `GO`,
+`RESULT:<base64>`, `ERROR:<base64>`). Dřív byl poziční: druhé (chybné)
+volání bariéry poslalo další `READY`, rodič ho přečetl místo výsledku,
+`base64_decode('READY', true)` vrátilo `false`, přetypování na string
+udělalo prázdný řetězec — a test falešně prošel jako úspěch. Teď druhé
+volání vyhodí výjimku ještě PŘED zápisem do kanálu, poškozený base64 se
+odmítá striktně a neznámý typ zprávy test shodí. Chybějící bariéra,
+bariéra navíc i porušený protokol se hlásí jako `ProtocolViolation`,
+nikdy jako „worker skončil s chybou“. Hlídá to `BarrierContractTest`.
+
+Cíl destruktivního `migrate:fresh` prověřuje `ConcurrencyDatabaseGuard`
+(viz README, sekce „Která databáze se smí smazat“).
+
 Zaručené chování:
 - dvě souběžné platby 4 000 a 3 000 → dvě platby, `paid_amount_minor` 7 000,
 - dvojitý `markPaid()` → právě jeden doplatek, uhrazeno nepřekročí celkem,
@@ -129,6 +142,16 @@ nic, ani legitimní část změny. Tiché ignorování by skrylo programátorsko
 chybu volajícího. `position` a `organization_id` položek doplňuje výhradně
 lifecycle služba z hodnot zamčené faktury.
 
+**Whitelist klíčů nestačí — kontroluje se i KAM reference ukazují.**
+Povolený `contact_id` může nést cizí id, takže se každá nenulová reference
+(contact_id, project_id, bank_account_id, number_series_id) ověřuje proti
+`organization_id` ZAMČENÉ faktury, nikdy proti ambientnímu tenant contextu
+(ten může být nastavený jinak nebo vůbec — konzole, fronta). Kontrola běží
+uvnitř transakce, ale PŘED změnou hlavičky, nahrazením položek, přepočtem
+i auditem, takže selhání (`InvalidInvoiceReference`) odvalí úplně všechno.
+HTTP validace v `IssuedInvoiceRequest` zůstává jako první vrstva, ale
+doménová služba si kontrakt hlídá sama.
+
 ### cancel(IssuedInvoice)
 Jen z issued a jen bez evidovaných plateb. cancelled_at = now, audit
 `invoice.cancelled`. Číslo faktury zůstává spotřebované (řada se nevrací) —
@@ -178,6 +201,17 @@ k zápisu faktur.
 Položky (`IssuedInvoiceItem`): creating/updating/deleting hook vyhodí
 výjimku, pokud rodičovská faktura není draft.
 
+**Vlastnická vazba potomka je po vytvoření NEMĚNNÁ.** `issued_invoice_id`
+(u příloh `received_invoice_id`) ani `organization_id` nelze update()em
+změnit — reparenting by byl zadní vrátka: guard se ptal na stav rodiče
+podle NOVÉ hodnoty, takže položku vystavené faktury šlo „přestěhovat“ na
+koncept, guard se zeptal konceptu, změnu povolil a historický doklad
+o položku přišel. Guard finality proto navíc vychází z PŮVODNÍHO rodiče
+(`getOriginal()`), u `creating` z aktuální hodnoty. Totéž platí pro mazání:
+`delete()` maže podle primárního klíče, takže podvržené parent ID v paměti
+by jinak smazalo řádek pod původním (finálním) dokladem. Přepis položek
+konceptu NENÍ reparenting — `updateDraft()` je maže a zakládá znovu.
+
 Platby (`Payment`): **append-only**. Vznikají výhradně v lifecycle
 službách; updating/deleting hook je odmítne vždy — jinak by se historie
 plateb rozešla s `paid_amount_minor` a stavem dokladu. Storno platby jako
@@ -219,14 +253,39 @@ nerozhoduje podle dřív načtené instance:
   řádkem); přílohy maže v téže transakci, jejich soubory až PO commitu
   (rollback nesmí nechat záznamy bez souborů). Audit `invoice.deleted`.
 
+### Finální stavy — jediný zdroj pravdy
+
+`ReceivedInvoice::FINAL_STATUSES` = **paid, rejected**. Tenhle seznam
+(a predikáty `isFinal()` / `isFinalStatus()`) používá VŠECHNO, co o finalitě
+rozhoduje: `updating` i `deleting` guard modelu, `updateDetails()`,
+`delete()` a `attach()` v lifecycle, guardy příloh, controller i šablona.
+Dřív se na několika místech testoval jen `=== Paid` samostatně, takže
+zamítnutou fakturu šlo smazat a její přílohy měnit i mazat. Ručně opsané
+seznamy stavů se proto v této doméně nepoužívají — rozejdou se.
+
 Model má stejné guardy jako vydaná faktura: `status` a `paid_at` mají
 jedinou (privátní) zápisovou cestu lifecycle služby, `organization_id` je
-neměnné vždy a fakturu ve FINÁLNÍM stavu (paid, rejected) `updating` guard
-odmítne změnit celou — podle stavu v DATABÁZI, ne podle instance. `deleting`
-guard odmítne smazat uhrazenou fakturu. Uhrazenou fakturu tedy nelze ani
-vrátit do předchozího stavu, ani přesunout mezi organizacemi. Přílohy
-uhrazené faktury jsou zmrazené (creating/updating/deleting guard na
-`ReceivedInvoiceAttachment`).
+neměnné vždy a fakturu ve finálním stavu `updating` guard odmítne změnit
+celou — podle stavu v DATABÁZI, ne podle instance. `deleting` guard odmítne
+smazat fakturu v jakémkoli finálním stavu. Finální fakturu tedy nelze ani
+vrátit do předchozího stavu, ani přesunout mezi organizacemi. Její přílohy
+jsou zmrazené (creating/updating/deleting guard na
+`ReceivedInvoiceAttachment`) a UI k ní upload ani mazání příloh nenabízí.
+
+### Přílohy: pořadí zápisu a kompenzace
+
+`attach()` jede: transakce → tenant-scoped zamčení → kontrola AKTUÁLNÍHO
+stavu → **teprve pak** zápis souboru → DB záznam → audit → commit. Dřív se
+soubor ukládal jako první a guard finální faktury insert odmítl až potom,
+takže na disku zůstal osiřelý soubor a HTTP vrátilo neošetřenou 500.
+Filesystem není součástí DB transakce, proto navíc kompenzace: selže-li
+cokoli po zápisu souboru (DB, audit, guard), soubor se smaže. Controller
+doménové chyby překládá na redirect s flash zprávou, ne na 500.
+
+Mazání jde opačně (nejdřív DB záznam, pak soubor) — odmítnuté mazání by
+jinak nechalo záznam bez souboru. Zbývající failure window: pád procesu
+mezi commitem a smazáním souboru nechá osiřelý soubor bez odkazu z DB,
+což je bezpečný směr (stejně jako u snapshotu loga).
 
 Souběžné protichůdné operace se serializují zámkem řádku a druhá je
 odmítnuta podle aktuálního stavu; dvojitý `markPaid` nevytvoří druhou
@@ -254,6 +313,26 @@ Při vystavení se logo organizace zmrazí KOPIÍ do `invoice-logos/org-{id}/`
 do `logo_snapshot_path`. Pozdější změna ani smazání firemního loga proto
 historický doklad nezmění. Koncept se renderuje z aktuálního loga
 organizace; snapshot se vykreslí jen pro vlastní organizaci.
+
+### Nakonfigurované vs. chybějící logo
+
+Rozlišují se dva různé stavy, které se dřív slévaly do jednoho `return null`:
+
+| Stav | Chování |
+|---|---|
+| `logo_path` je NULL — organizace logo nemá | legitimní; faktura se vystaví bez snapshotu |
+| `logo_path` vyplněná, ale soubor chybí, nejde přečíst nebo cesta není použitelná | `LogoSnapshotFailed`; vystavení se odvalí, faktura zůstane konceptem, číslo se NESPOTŘEBUJE a audit nevznikne |
+
+Druhý případ dřív tiše vrátil null — doklad se vystavil bez loga, které si
+organizace nastavila, a spotřeboval číslo. Náprava pro uživatele je nahrát
+logo znovu nebo ho v nastavení odebrat.
+
+Použitelná cesta = relativní, bez `..` a bez řídicích znaků, uvnitř
+`logos/org-{id}/` vlastní organizace. Kontrola je čistě řetězcová a běží
+PŘED jakýmkoli dotykem filesystemu: Flysystem `..` normalizuje (nezakazuje),
+takže `logos/org-2/../org-3/logo.png` by prefixem prošlo a přečetlo cizí
+adresář, a cesta s řídicími znaky by z adaptéru vyhodila negenerickou
+výjimku.
 
 ### Konzistence souboru a databáze — kompenzace, ne společná transakce
 

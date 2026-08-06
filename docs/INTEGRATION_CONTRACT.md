@@ -93,13 +93,41 @@ hodnota i proti ručně založeným kontaktům. Nic víc se NEDĚLÁ — žádn�
 odstraňování gmailových teček, `+tagů` ani přepisy domén: takové úpravy by
 slepily odlišné adresy.
 
+#### Transakční kontrakt: resolve PŘED transakcí
+
+**Email-only párování NESMÍ běžet uvnitř transakce, kterou resolver
+neřídí.** Aplikační zámek `GET_LOCK` je vázaný na SESSION, ne na transakci:
+uvnitř nadřazené `DB::transaction()` by se uvolnil ve chvíli, kdy resolver
+skončí — tedy PŘED commitem volajícího. Druhý souběžný požadavek by zámek
+získal, nově založený kontakt ale ještě neviděl a založil by druhý.
+(Ověřeno proti MariaDB 10.4: `GET_LOCK` přežije COMMIT i ROLLBACK a z jiného
+spojení ho uvolnit nelze.)
+
+Resolver proto v takové situaci **fail closed** vyhodí
+`CustomerResolutionNotTransactional`. Integrace má vyřešit zákazníka
+a teprve pak otevřít transakci, která zakládá doklad:
+
+```php
+$customer = $resolver->resolve($payload['customer']);   // mimo transakci
+DB::transaction(fn () => /* založení konceptu, položky, vystavení */);
+```
+
+Omezení platí JEN pro email-only větev. Silnější klíče (`external_id`, IČO)
+zámek nepotřebují — kryje je unikátní index — a uvnitř transakce běžet smí.
+
+Nedostupný zámek končí doménovou `CustomerLockUnavailable` (retry-able),
+ne obecnou `RuntimeException`, aby ji budoucí API error handler odlišil od
+interní chyby. Timeout je 10 s a je konfigurovatelný konstruktorem.
+
 #### Souběh email-only požadavků
 
 Dva souběžné požadavky bez `external_id` a IČO se stejným e-mailem dřív
 mohly založit dva kontakty (lookup obou proběhl před insertem toho
 druhého; unikátní index tu z principu není). Email-only větev proto drží
 **tenant-scoped aplikační zámek** nad kanonickým e-mailem (MariaDB
-`GET_LOCK`, název = hash organizace + e-mailu, timeout 10 s): lookup
+`GET_LOCK`, název = hash databáze + organizace + e-mailu, timeout 10 s;
+jmenný prostor zámků je serverový, ne per-database, proto je v hashi i jméno
+databáze): lookup
 a případné založení jsou serializované a druhý požadavek po získání zámku
 najde kontakt založený prvním. Stejný e-mail v jiné organizaci se
 neblokuje (zámek nese tenant). Nedostupnost zámku končí výjimkou, ne
@@ -169,6 +197,11 @@ uhodne. Kromě validačních chyb jsou to zejména:
 |---|---|
 | dvojznačný e-mail bez silnějšího klíče | `AmbiguousCustomerMatch` |
 | nové `external_id` s obsazeným IČEM | `AmbiguousCustomerMatch` |
+| email-only párování uvnitř cizí transakce | `CustomerResolutionNotTransactional` |
+| zámek e-mailu nedostupný v limitu | `CustomerLockUnavailable` (opakovat) |
+| reference konceptu patří jiné organizaci | `InvalidInvoiceReference` |
+| příloha k uhrazené či zamítnuté faktuře | `InvalidStateTransition` |
+| nastavené logo organizace na disku chybí | `LogoSnapshotFailed` |
 | nulový nebo záporný součet faktury | `InvoiceNotIssuable` |
 | částka mimo podporovaný rozsah | `MoneyOverflow` |
 | faktura patří jiné organizaci | `InvoiceNotFound` (fail closed) |
