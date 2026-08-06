@@ -10,7 +10,6 @@ use App\Models\Contact;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
-use RuntimeException;
 
 /**
  * Dohledá nebo založí odběratele pro automatické fakturování z napojeného
@@ -41,7 +40,21 @@ use RuntimeException;
  */
 final class CustomerResolver
 {
-    private const int EMAIL_LOCK_TIMEOUT_SECONDS = 10;
+    public const int DEFAULT_LOCK_TIMEOUT_SECONDS = 10;
+
+    /**
+     * Drivery s aplikačním zámkem GET_LOCK. `mariadb` je v config/database.php
+     * samostatné spojení — kdyby tu chyběl, zámek by se pro něj TIŠE vypnul.
+     */
+    private const array LOCKING_DRIVERS = ['mysql', 'mariadb'];
+
+    /**
+     * Timeout je parametr, aby ho testy mohly zkrátit; výchozí hodnota
+     * platí pro kontejnerem sestavenou instanci.
+     */
+    public function __construct(
+        private readonly int $lockTimeoutSeconds = self::DEFAULT_LOCK_TIMEOUT_SECONDS,
+    ) {}
 
     /**
      * @param  array{name: string, external_id?: ?string, ico?: ?string, dic?: ?string, email?: ?string, phone?: ?string, street?: ?string, city?: ?string, zip?: ?string, country?: ?string}  $data
@@ -182,35 +195,57 @@ final class CustomerResolver
     {
         $connection = DB::connection();
 
-        if ($connection->getDriverName() !== 'mysql') {
+        if (! in_array($connection->getDriverName(), self::LOCKING_DRIVERS, true)) {
             return $callback();
         }
 
-        // Název zámku: hash (organizace, e-mail) — vejde se do limitu 64
-        // znaků (MySQL) a nese tenant scope, takže stejný e-mail v jiné
-        // organizaci neblokuje.
-        $name = 'mkf:cust:'.substr(
-            hash('sha256', (app(CurrentOrganization::class)->id() ?? 'none').'|'.$canonicalEmail),
-            0,
-            40,
-        );
+        // GET_LOCK je vázaný na SESSION, ne na transakci: uvnitř nadřazené
+        // transakce by se uvolnil dřív než commit a druhý požadavek by
+        // založil duplicitu. Kontrakt proto zní „resolve PŘED transakcí“
+        // a jeho porušení se hlásí, ne obchází.
+        if ($connection->transactionLevel() > 0) {
+            throw CustomerResolutionNotTransactional::make();
+        }
 
+        $name = $this->lockName($connection->getDatabaseName(), $canonicalEmail);
+
+        // useReadPdo = false: zámek i jeho uvolnění MUSÍ jet po zápisovém
+        // spojení. Na read repliky by GET_LOCK sice uspěl, ale hlídal by
+        // úplně jinou session než ta, která kontakt zakládá.
         $acquired = $connection->selectOne(
             'SELECT GET_LOCK(?, ?) AS acquired',
-            [$name, self::EMAIL_LOCK_TIMEOUT_SECONDS],
+            [$name, $this->lockTimeoutSeconds],
+            false,
         );
 
         if ((int) ($acquired->acquired ?? 0) !== 1) {
-            throw new RuntimeException(
-                'Nepodařilo se získat zámek pro párování zákazníka podle e-mailu — zkuste požadavek opakovat.',
-            );
+            throw CustomerLockUnavailable::afterSeconds($this->lockTimeoutSeconds);
         }
 
         try {
             return $callback();
         } finally {
-            $connection->selectOne('SELECT RELEASE_LOCK(?) AS released', [$name]);
+            // Uvolnění MUSÍ jít přes totéž spojení, které zámek získalo —
+            // jiná session ho uvolnit nemůže (RELEASE_LOCK by vrátil 0).
+            $connection->selectOne('SELECT RELEASE_LOCK(?) AS released', [$name], false);
         }
+    }
+
+    /**
+     * Jmenný prostor GET_LOCK je SERVEROVÝ, ne per-database: vývojová
+     * a testovací databáze na jedné instanci by si jinak zámky navzájem
+     * blokovaly. Do hashe proto patří i jméno databáze. Výsledek se vejde
+     * do limitu 64 znaků.
+     */
+    private function lockName(string $database, string $canonicalEmail): string
+    {
+        $organizationId = app(CurrentOrganization::class)->id() ?? 'none';
+
+        return 'mkf:cust:'.substr(
+            hash('sha256', $database.'|'.$organizationId.'|'.$canonicalEmail),
+            0,
+            40,
+        );
     }
 
     /**
