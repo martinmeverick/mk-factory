@@ -267,4 +267,134 @@ class CustomerResolverTest extends TestCase
         $this->assertNull($contact->ico);
         $this->assertNull($contact->email);
     }
+
+    /**
+     * RE-REVIEW: e-mail se kanonizuje (trim + lowercase) při ukládání
+     * i hledání — 'User@Example.com' a 'user@example.com' jsou táž hodnota.
+     */
+    public function test_email_is_canonicalised_on_store_and_lookup(): void
+    {
+        $first = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'email' => '  User@Example.com  ',
+        ]);
+
+        $this->assertSame('user@example.com', $first->email, 'Ukládá se kanonická hodnota.');
+
+        $second = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'email' => 'user@example.com',
+        ]);
+
+        $this->assertSame($first->id, $second->id, 'Kanonicky shodné adresy párují týž kontakt.');
+        $this->assertSame(1, Contact::query()->count());
+    }
+
+    public function test_lookup_matches_a_manually_created_contact_with_different_case(): void
+    {
+        $existing = Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'ico' => null,
+            'external_id' => null,
+            // Ručně založený kontakt s e-mailem v původní velikosti písmen.
+            'email' => 'Jana.Novakova@Example.com',
+            'type' => ContactType::Customer,
+        ]);
+
+        $contact = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'email' => 'jana.novakova@example.com',
+        ]);
+
+        $this->assertSame($existing->id, $contact->id);
+        $this->assertSame(1, Contact::query()->count());
+    }
+
+    public function test_no_provider_specific_rewrites_are_applied(): void
+    {
+        $withTag = $this->resolver->resolve([
+            'name' => 'S tagem',
+            'email' => 'jana+eshop@example.com',
+        ]);
+
+        $withDots = $this->resolver->resolve([
+            'name' => 'S tečkou navíc',
+            'email' => 'j.ana@example.com',
+        ]);
+
+        $plain = $this->resolver->resolve([
+            'name' => 'Bez tagu',
+            'email' => 'jana@example.com',
+        ]);
+
+        // +tag ani tečky se NEODSTRAŇUJÍ — jsou to odlišné adresy.
+        $this->assertNotSame($withTag->id, $plain->id);
+        $this->assertNotSame($withDots->id, $plain->id);
+        $this->assertSame(3, Contact::query()->count());
+    }
+
+    public function test_case_variant_duplicates_still_raise_ambiguity(): void
+    {
+        Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'email' => 'rodina@example.test',
+            'external_id' => null,
+            'ico' => null,
+        ]);
+        Contact::factory()->create([
+            'organization_id' => $this->organization->id,
+            'email' => 'Rodina@Example.test',
+            'external_id' => null,
+            'ico' => null,
+        ]);
+
+        $this->expectException(AmbiguousCustomerMatch::class);
+
+        $this->resolver->resolve([
+            'name' => 'Kdokoli',
+            'email' => 'RODINA@EXAMPLE.TEST',
+        ]);
+    }
+
+    public function test_same_email_in_another_organization_is_ignored(): void
+    {
+        $otherOrganization = Organization::factory()->create();
+        Contact::withoutGlobalScope('organization')->create([
+            'organization_id' => $otherOrganization->id,
+            'name' => 'Cizí zákazník',
+            'email' => 'jana@example.com',
+            'type' => ContactType::Customer,
+        ]);
+
+        $contact = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'email' => 'jana@example.com',
+        ]);
+
+        $this->assertSame($this->organization->id, $contact->organization_id);
+        $this->assertSame(
+            2,
+            Contact::withoutGlobalScope('organization')->whereRaw('LOWER(email) = ?', ['jana@example.com'])->count(),
+            'V každé organizaci existuje vlastní kontakt.',
+        );
+    }
+
+    public function test_external_id_remains_the_stronger_key_over_canonical_email(): void
+    {
+        $byEmail = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'email' => 'jana@example.com',
+        ]);
+
+        // Stejný (jen jinak zapsaný) e-mail, ale s external_id → e-mail se
+        // nesmí použít ani k záchraně, ani k párování.
+        $byExternal = $this->resolver->resolve([
+            'name' => 'Jana Nováková',
+            'external_id' => 'ujabka-cust-9',
+            'email' => 'JANA@EXAMPLE.COM',
+        ]);
+
+        $this->assertNotSame($byEmail->id, $byExternal->id);
+        $this->assertSame('ujabka-cust-9', $byExternal->external_id);
+    }
 }
