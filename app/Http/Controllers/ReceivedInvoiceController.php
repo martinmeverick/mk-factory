@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Domain\Contacts\SupplierNotResolvable;
 use App\Domain\Contacts\SupplierResolver;
 use App\Domain\Invoicing\InvalidStateTransition;
+use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\ReceivedInvoiceLifecycle;
 use App\Domain\Money\Money;
 use App\Enums\ContactType;
@@ -84,30 +85,25 @@ class ReceivedInvoiceController extends Controller
 
     public function update(ReceivedInvoiceRequest $request, ReceivedInvoice $received): RedirectResponse
     {
-        if (! $this->isEditable($received)) {
-            return redirect()->route('received.show', $received)
-                ->with('error', 'Uhrazenou nebo zamítnutou fakturu nelze upravovat.');
+        // O editovatelnosti rozhoduje až zamčený řádek v lifecycle vrstvě.
+        try {
+            $this->lifecycle->updateDetails($received, $this->data($request));
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
         }
-
-        $received->update($this->data($request));
 
         return redirect()->route('received.show', $received)->with('status', 'Faktura byla upravena.');
     }
 
     public function destroy(ReceivedInvoice $received): RedirectResponse
     {
-        if ($received->status === ReceivedInvoiceStatus::Paid) {
-            return redirect()->route('received.show', $received)
-                ->with('error', 'Uhrazenou fakturu nelze smazat.');
+        // Smazatelnost rozhoduje aktuální stav zamčeného řádku, ne dřív
+        // načtená instance; přílohy a soubory uklízí lifecycle.
+        try {
+            $this->lifecycle->delete($received);
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
         }
-
-        DB::transaction(function () use ($received) {
-            foreach ($received->attachments as $attachment) {
-                \Illuminate\Support\Facades\Storage::disk('local')->delete($attachment->stored_path);
-                $attachment->delete();
-            }
-            $received->delete();
-        });
 
         return redirect()->route('received.index')->with('status', 'Přijatá faktura byla smazána.');
     }

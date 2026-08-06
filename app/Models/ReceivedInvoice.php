@@ -2,9 +2,11 @@
 
 namespace App\Models;
 
+use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Domain\Money\Money;
 use App\Domain\Tenancy\BelongsToOrganization;
 use App\Enums\ReceivedInvoiceStatus;
+use Database\Factories\ReceivedInvoiceFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -15,8 +17,33 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class ReceivedInvoice extends Model
 {
-    /** @use HasFactory<\Database\Factories\ReceivedInvoiceFactory> */
+    /** @use HasFactory<ReceivedInvoiceFactory> */
     use BelongsToOrganization, HasFactory;
+
+    /**
+     * Stavová pole zapisuje VÝHRADNĚ ReceivedInvoiceLifecycle interním
+     * zápisem persistLifecycleState() — veřejná cesta (update/save) je
+     * nezmění v žádném stavu. Uhrazení tedy nejde předstírat ani vrátit
+     * přímým přepsáním stavu.
+     */
+    public const array LIFECYCLE_ATTRIBUTES = [
+        'status',
+        'paid_at',
+    ];
+
+    /**
+     * Finální stavy — fakturu v nich už nelze měnit (viz updating guard).
+     */
+    public const array FINAL_STATUSES = [
+        ReceivedInvoiceStatus::Paid,
+        ReceivedInvoiceStatus::Rejected,
+    ];
+
+    /**
+     * Příznak probíhajícího interního zápisu; nastavuje ho pouze private
+     * persistLifecycleState(), veřejné přepínání neexistuje.
+     */
+    private bool $inLifecycleWrite = false;
 
     protected $guarded = [];
 
@@ -36,6 +63,85 @@ class ReceivedInvoice extends Model
             'total_minor' => 'integer',
             'vat_minor' => 'integer',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        static::updating(function (self $invoice): void {
+            // Tenant identita je neměnná bez ohledu na stav.
+            if ($invoice->isDirty('organization_id')) {
+                throw ImmutableInvoiceViolation::forTenantChange($invoice);
+            }
+
+            // Stavová pole mění jen interní zápis lifecycle služby.
+            if (! $invoice->inLifecycleWrite) {
+                foreach (self::LIFECYCLE_ATTRIBUTES as $attribute) {
+                    if ($invoice->isDirty($attribute)) {
+                        throw ImmutableInvoiceViolation::forReceivedLifecycleAttribute($invoice, $attribute);
+                    }
+                }
+            }
+
+            // Finalita se posuzuje podle DATABÁZE, ne podle této (možná
+            // zastaralé) instance — stará instance jinak po souběžném
+            // markPaid() přepíše uhrazený doklad.
+            if (in_array($invoice->persistedStatus(), self::FINAL_STATUSES, true)) {
+                throw ImmutableInvoiceViolation::forFinalReceivedInvoice($invoice);
+            }
+        });
+
+        static::deleting(function (self $invoice): void {
+            // I mazání rozhoduje aktuální stav v DB, ne stav instance.
+            if ($invoice->persistedStatus() === ReceivedInvoiceStatus::Paid) {
+                throw ImmutableInvoiceViolation::forReceivedDeletion($invoice);
+            }
+        });
+    }
+
+    /**
+     * Aktuální stav podle databáze (nikoli podle této PHP instance).
+     * Uvnitř transakce se zamčeným řádkem jde o levné čtení.
+     */
+    public function persistedStatus(): ?ReceivedInvoiceStatus
+    {
+        if (! $this->exists) {
+            return null;
+        }
+
+        $value = static::query()
+            ->withoutGlobalScope('organization')
+            ->whereKey($this->getKey())
+            ->value('status');
+
+        return match (true) {
+            $value === null => null,
+            $value instanceof ReceivedInvoiceStatus => $value,
+            default => ReceivedInvoiceStatus::from((string) $value),
+        };
+    }
+
+    /**
+     * Jediná zápisová cesta stavových polí. PRIVATE schválně — PHPDoc není
+     * přístupový modifikátor. ReceivedInvoiceLifecycle se váže přes
+     * Closure::bind do scope modelu (obdoba friend třídy).
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function persistLifecycleState(array $attributes): void
+    {
+        $unexpected = array_diff(array_keys($attributes), self::LIFECYCLE_ATTRIBUTES);
+
+        if ($unexpected !== []) {
+            throw ImmutableInvoiceViolation::forReceivedLifecycleAttribute($this, implode(', ', $unexpected));
+        }
+
+        $this->inLifecycleWrite = true;
+
+        try {
+            $this->forceFill($attributes)->save();
+        } finally {
+            $this->inLifecycleWrite = false;
+        }
     }
 
     public function contact(): BelongsTo

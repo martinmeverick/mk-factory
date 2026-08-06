@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Models\ReceivedInvoice;
 use App\Models\ReceivedInvoiceAttachment;
 use Illuminate\Http\RedirectResponse;
@@ -57,8 +58,16 @@ class AttachmentController extends Controller
     {
         $received = $attachment->receivedInvoice;
 
+        // Nejdřív záznam (guard přílohy uhrazené faktury smazání odmítne),
+        // až pak soubor — opačné pořadí by po odmítnutí nechalo záznam
+        // bez souboru.
+        try {
+            $attachment->delete();
+        } catch (ImmutableInvoiceViolation $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
+        }
+
         Storage::disk('local')->delete($attachment->stored_path);
-        $attachment->delete();
 
         return redirect()->route('received.show', $received)->with('status', 'Příloha byla smazána.');
     }
