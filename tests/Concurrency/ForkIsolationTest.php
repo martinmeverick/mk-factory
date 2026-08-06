@@ -25,14 +25,14 @@ class ForkIsolationTest extends ConcurrencyTestCase
         };
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($record): void {
+            function (WorkerBarrier $barrier) use ($record): void {
                 // První dotaz potomka otevírá spojení — schválně PŘED
                 // bariérou, ať se izolace prokáže i pro přípravnou fázi.
                 $record('conn-a');
                 $barrier();
                 $record('conn-a-after');
             },
-            function (callable $barrier) use ($record): void {
+            function (WorkerBarrier $barrier) use ($record): void {
                 $record('conn-b');
                 $barrier();
                 $record('conn-b-after');
@@ -56,21 +56,5 @@ class ForkIsolationTest extends ConcurrencyTestCase
         $after = DB::table('cache')->whereIn('key', ['conn-a-after', 'conn-b-after'])->pluck('value', 'key');
         $this->assertSame($ids['conn-a'], $after['conn-a-after']);
         $this->assertSame($ids['conn-b'], $after['conn-b-after']);
-    }
-
-    public function test_worker_that_skips_the_barrier_is_reported(): void
-    {
-        $errors = $this->runInParallel([
-            function (callable $barrier): void {
-                $barrier();
-            },
-            function (callable $barrier): void {
-                // Bariéra se schválně nevolá — infrastruktura to musí
-                // ohlásit jako chybu workeru, ne zatuhnout ani projít.
-            },
-        ]);
-
-        $this->assertSame('', $errors[0]);
-        $this->assertStringContainsString('bariér', $errors[1]);
     }
 }

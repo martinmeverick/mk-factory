@@ -22,10 +22,11 @@ use Illuminate\Support\Facades\Http;
  *    druhý proces),
  *  - forkují skutečné procesy, každý s VLASTNÍM DB spojením (rodič se
  *    odpojí PŘED forkem, potomci tedy žádné PDO nezdědí),
- *  - synchronizují se DETERMINISTICKOU bariérou: každý worker dokončí
- *    přípravu, ohlásí rodiči READY a blokuje; rodič potvrdí, že bariéry
- *    dosáhli VŠICHNI, a teprve pak je současně uvolní GO. Bez bariéry by
- *    překryv kritických sekcí závisel jen na náhodě plánovače.
+ *  - synchronizují se JEDNORÁZOVOU bariérou: každý worker dokončí přípravu,
+ *    ohlásí rodiči READY a blokuje; rodič potvrdí, že bariéry dosáhli
+ *    VŠICHNI, a teprve pak je současně uvolní GO,
+ *  - před `migrate:fresh` prověří databázi (ConcurrencyDatabaseGuard) —
+ *    destruktivní operace nesmí dopadnout na jiné než testovací schéma.
  *
  * Spuštění: `composer test:concurrency` (viz README).
  */
@@ -52,18 +53,23 @@ abstract class ConcurrencyTestCase extends BaseTestCase
             $this->markTestSkipped('Souběžné testy vyžadují rozšíření pcntl a posix.');
         }
 
-        if (DB::connection()->getDriverName() !== 'mysql') {
+        if (! in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
             $this->markTestSkipped(
                 'Souběžné testy vyžadují MariaDB/MySQL. Spusťte je přes `composer test:concurrency`.'
             );
         }
+
+        // Fail closed PŘED jakoukoli destruktivní operací. Bez této kontroly
+        // by stačilo přepsat DB_DATABASE proměnnou prostředí a migrate:fresh
+        // by zahodil cizí schéma.
+        ConcurrencyDatabaseGuard::assertSafe(DB::connection());
 
         Artisan::call('migrate:fresh', ['--force' => true]);
     }
 
     protected function tearDown(): void
     {
-        if (DB::connection()->getDriverName() === 'mysql') {
+        if (in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)) {
             DB::disconnect();
         }
 
@@ -72,18 +78,21 @@ abstract class ConcurrencyTestCase extends BaseTestCase
 
     /**
      * Spustí zadané uzávěry ve skutečně samostatných procesech, každý
-     * s vlastním DB spojením, synchronizované bariérou.
+     * s vlastním DB spojením, synchronizované jednorázovou bariérou.
      *
-     * Každý worker dostane `callable $barrier` a MUSÍ ho zavolat právě
-     * jednou: před bariérou patří příprava (vlastní spojení, načtení
-     * modelů), za bariéru samotná konkurenční operace. Vrací chybové
+     * Každý worker dostane `WorkerBarrier $barrier` (volá se jako
+     * `$barrier();`) a MUSÍ ho zavolat právě jednou: před bariérou patří
+     * příprava, za bariéru samotná konkurenční operace. Vrací chybové
      * hlášky potomků (prázdný řetězec = potomek uspěl).
      *
-     * Synchronizačním prostředkem jsou socketpairy; uklízejí se ve
-     * `finally` včetně SIGKILL potomků, kteří po selhání testu visí.
+     * Porušení protokolu (chybějící bariéra, bariéra navíc, poškozená nebo
+     * neznámá zpráva) NIKDY nevrací jako výsledek workeru — vyhodí
+     * ProtocolViolation, takže test spadne místo falešného úspěchu.
      *
-     * @param  list<\Closure(callable(): void): void>  $workers
+     * @param  list<\Closure(WorkerBarrier): void>  $workers
      * @return list<string>
+     *
+     * @throws ProtocolViolation
      */
     protected function runInParallel(array $workers): array
     {
@@ -123,34 +132,66 @@ abstract class ConcurrencyTestCase extends BaseTestCase
 
             // Fáze 1: KAŽDÝ potomek musí ohlásit dosažení bariéry. Teprve
             // potvrzení všech zaručuje, že příprava všech workerů skončila.
+            // Čte se od VŠECH, i když první ohlásí porušení protokolu —
+            // jinak by zbylí workeři viseli na fgets() a report by byl
+            // neúplný.
+            $violations = [];
+
             foreach ($sockets as $index => $socket) {
                 stream_set_timeout($socket, self::BARRIER_TIMEOUT_SECONDS);
-                $line = fgets($socket);
 
-                if (trim((string) $line) !== 'READY') {
-                    $this->fail(sprintf(
-                        'Potomek %d nedosáhl bariéry (přišlo %s) — příprava selhala nebo visí.',
-                        $index,
-                        var_export($line, true),
-                    ));
+                try {
+                    $message = BarrierProtocol::decode(fgets($socket), "čekání na bariéru workeru {$index}");
+                } catch (ProtocolViolation $e) {
+                    $violations[] = $e->getMessage();
+
+                    continue;
                 }
+
+                if ($message['type'] === BarrierProtocol::ERROR) {
+                    $violations[] = ProtocolViolation::forWorker($index, $message['payload'])->getMessage();
+
+                    continue;
+                }
+
+                if ($message['type'] !== BarrierProtocol::READY) {
+                    $violations[] = ProtocolViolation::forUnexpectedType(
+                        BarrierProtocol::READY,
+                        $message['type'],
+                        "čekání na bariéru workeru {$index}",
+                    )->getMessage();
+                }
+            }
+
+            if ($violations !== []) {
+                throw new ProtocolViolation(implode(' | ', $violations));
             }
 
             // Fáze 2: současné uvolnění všech potomků do kritické sekce.
             foreach ($sockets as $socket) {
-                fwrite($socket, "GO\n");
+                fwrite($socket, BarrierProtocol::go());
             }
 
-            // Fáze 3: výsledky (base64 — přežijí i víceřádkové výjimky).
+            // Fáze 3: výsledky. Typovaná zpráva + striktní base64 — poškozený
+            // payload se nesmí tiše proměnit v prázdnou (úspěšnou) hlášku.
             foreach ($sockets as $index => $socket) {
                 stream_set_timeout($socket, self::RESULT_TIMEOUT_SECONDS);
-                $line = fgets($socket);
 
-                if ($line === false) {
-                    $this->fail("Potomek {$index} neodeslal výsledek (timeout nebo pád procesu).");
+                $message = BarrierProtocol::decode(fgets($socket), "výsledek workeru {$index}");
+
+                if ($message['type'] === BarrierProtocol::ERROR) {
+                    throw ProtocolViolation::forWorker($index, $message['payload']);
                 }
 
-                $errors[$index] = (string) base64_decode(trim($line), true);
+                if ($message['type'] !== BarrierProtocol::RESULT) {
+                    throw ProtocolViolation::forUnexpectedType(
+                        BarrierProtocol::RESULT,
+                        $message['type'],
+                        "výsledek workeru {$index}",
+                    );
+                }
+
+                $errors[$index] = $message['payload'];
             }
         } finally {
             foreach ($sockets as $socket) {
@@ -172,54 +213,51 @@ abstract class ConcurrencyTestCase extends BaseTestCase
      * výsledku. Nikdy se nevrací — exit(0) obchází shutdown handlery
      * PHPUnitu, potomek nesmí reportovat testy.
      *
-     * @param  \Closure(callable(): void): void  $worker
+     * @param  \Closure(WorkerBarrier): void  $worker
      * @param  resource  $socket
      */
     private function runWorker(\Closure $worker, $socket): never
     {
-        // Pojistka k odpojení rodiče před forkem — potomek začíná bez PDO
-        // a první dotaz mu otevře vlastní spojení.
-        DB::disconnect();
-
-        $barrierUsed = false;
-
-        $barrier = function () use ($socket, &$barrierUsed): void {
-            $barrierUsed = true;
-
-            fwrite($socket, "READY\n");
-            stream_set_timeout($socket, self::BARRIER_TIMEOUT_SECONDS);
-            $line = fgets($socket);
-
-            if (trim((string) $line) !== 'GO') {
-                throw new \RuntimeException('Bariéra nebyla uvolněna: '.var_export($line, true));
-            }
-        };
-
-        $error = '';
-
         try {
-            $worker($barrier);
+            // Pojistka k odpojení rodiče před forkem — potomek začíná bez
+            // PDO a první dotaz mu otevře vlastní spojení.
+            DB::disconnect();
 
-            if (! $barrierUsed) {
-                $error = 'Worker nezavolal $barrier() — bez bariéry není souběh deterministický.';
+            $barrier = new WorkerBarrier($socket, self::BARRIER_TIMEOUT_SECONDS);
+
+            $error = '';
+            $protocolError = null;
+
+            try {
+                $worker($barrier);
+            } catch (ProtocolViolation $e) {
+                $protocolError = $e->getMessage();
+            } catch (\Throwable $e) {
+                $error = get_class($e).': '.$e->getMessage();
             }
-        } catch (\Throwable $e) {
-            $error = get_class($e).': '.$e->getMessage();
+
+            if ($protocolError === null && $barrier->callCount() === 0) {
+                $protocolError = ProtocolViolation::forMissingBarrier()->getMessage()
+                    .($error === '' ? '' : ' Worker navíc skončil chybou: '.$error);
+            }
+
+            // ERROR se posílá i místo READY: worker, který bariéry nedosáhl,
+            // by jinak nechal rodiče viset. Rodič ho pozná podle typu zprávy
+            // v obou fázích a shodí test.
+            WorkerBarrier::writeQuietly($socket, $protocolError !== null
+                ? BarrierProtocol::error($protocolError)
+                : BarrierProtocol::result($error));
+        } catch (\Throwable) {
+            // Potomek nesmí za žádných okolností reportovat testy ani nechat
+            // uniknout výjimku — rodič už mohl kanál zavřít (rozbitá roura).
+        } finally {
+            if (is_resource($socket)) {
+                @fclose($socket);
+            }
+
+            // Bez shutdown handlerů PHPUnitu.
+            exit(0);
         }
-
-        // Worker, který bariéru nezavolal (typicky pád v přípravě), by
-        // rodiče nechal viset na READY — protokol se dorovná dodatečně
-        // a chyba odejde ve výsledku.
-        if (! $barrierUsed) {
-            fwrite($socket, "READY\n");
-            stream_set_timeout($socket, self::BARRIER_TIMEOUT_SECONDS);
-            fgets($socket);
-        }
-
-        fwrite($socket, base64_encode($error)."\n");
-        fclose($socket);
-
-        exit(0);
     }
 
     /**
