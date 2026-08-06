@@ -32,7 +32,12 @@ class ReceivedInvoice extends Model
     ];
 
     /**
-     * Finální stavy — fakturu v nich už nelze měnit (viz updating guard).
+     * Finální stavy — JEDINÝ zdroj pravdy pro celou doménu přijatých faktur.
+     *
+     * Fakturu v tomto stavu už nelze změnit, smazat, ani jí měnit přílohy;
+     * rozhodují podle něj model, lifecycle služba, guardy příloh
+     * i controller. Dřív se na několika místech testoval jen stav `paid`
+     * samostatně, takže zamítnutá faktura šla smazat a její přílohy měnit.
      */
     public const array FINAL_STATUSES = [
         ReceivedInvoiceStatus::Paid,
@@ -85,17 +90,36 @@ class ReceivedInvoice extends Model
             // Finalita se posuzuje podle DATABÁZE, ne podle této (možná
             // zastaralé) instance — stará instance jinak po souběžném
             // markPaid() přepíše uhrazený doklad.
-            if (in_array($invoice->persistedStatus(), self::FINAL_STATUSES, true)) {
+            if (self::isFinalStatus($invoice->persistedStatus())) {
                 throw ImmutableInvoiceViolation::forFinalReceivedInvoice($invoice);
             }
         });
 
         static::deleting(function (self $invoice): void {
-            // I mazání rozhoduje aktuální stav v DB, ne stav instance.
-            if ($invoice->persistedStatus() === ReceivedInvoiceStatus::Paid) {
+            // I mazání rozhoduje aktuální stav v DB, ne stav instance —
+            // a finální je uhrazená I zamítnutá faktura.
+            if (self::isFinalStatus($invoice->persistedStatus())) {
                 throw ImmutableInvoiceViolation::forReceivedDeletion($invoice);
             }
         });
+    }
+
+    /**
+     * Jediné místo, kde se rozhoduje o finalitě stavu. Přijímá i null
+     * (neexistující řádek), aby volající nemusel rozlišovat.
+     */
+    public static function isFinalStatus(?ReceivedInvoiceStatus $status): bool
+    {
+        return $status !== null && in_array($status, self::FINAL_STATUSES, true);
+    }
+
+    /**
+     * Finalita podle stavu TÉTO instance. Pro rozhodování o mutaci použij
+     * zamčený řádek nebo persistedStatus() — instance může být zastaralá.
+     */
+    public function isFinal(): bool
+    {
+        return self::isFinalStatus($this->status);
     }
 
     /**

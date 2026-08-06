@@ -4,17 +4,29 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Invoicing\AttachmentStorageFailed;
 use App\Domain\Invoicing\ImmutableInvoiceViolation;
+use App\Domain\Invoicing\InvalidStateTransition;
+use App\Domain\Invoicing\InvoiceNotFound;
+use App\Domain\Invoicing\ReceivedInvoiceLifecycle;
 use App\Models\ReceivedInvoice;
 use App\Models\ReceivedInvoiceAttachment;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class AttachmentController extends Controller
 {
+    public function __construct(
+        private readonly ReceivedInvoiceLifecycle $lifecycle,
+    ) {}
+
+    /**
+     * O tom, zda příloha smí vzniknout, rozhoduje až zamčený řádek
+     * v lifecycle vrstvě — controller stav neposuzuje podle dřív načtené
+     * instance a soubor ukládá až lifecycle, po kontrole stavu.
+     */
     public function store(Request $request, ReceivedInvoice $received): RedirectResponse
     {
         $request->validate(
@@ -26,25 +38,13 @@ class AttachmentController extends Controller
             ['attachment' => 'příloha'],
         );
 
-        $this->attach($received, $request->file('attachment'));
+        try {
+            $this->lifecycle->attach($received, $request->file('attachment'));
+        } catch (InvalidStateTransition|InvoiceNotFound|AttachmentStorageFailed $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
+        }
 
         return redirect()->route('received.show', $received)->with('status', 'Příloha byla nahrána.');
-    }
-
-    /**
-     * Uloží soubor pod hash názvem na privátní disk a založí záznam.
-     */
-    public function attach(ReceivedInvoice $received, UploadedFile $file): ReceivedInvoiceAttachment
-    {
-        $path = $file->store('attachments/org-'.$received->organization_id, 'local');
-
-        return $received->attachments()->create([
-            'organization_id' => $received->organization_id,
-            'original_filename' => $file->getClientOriginalName(),
-            'stored_path' => $path,
-            'mime_type' => $file->getMimeType() ?? 'application/octet-stream',
-            'size_bytes' => $file->getSize() ?: 0,
-        ]);
     }
 
     public function download(ReceivedInvoiceAttachment $attachment): StreamedResponse

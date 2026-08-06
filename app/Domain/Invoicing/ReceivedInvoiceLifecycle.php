@@ -8,7 +8,9 @@ use App\Domain\Audit\AuditLogger;
 use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\ReceivedInvoiceStatus;
 use App\Models\ReceivedInvoice;
+use App\Models\ReceivedInvoiceAttachment;
 use Carbon\CarbonImmutable;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
@@ -33,6 +35,8 @@ final class ReceivedInvoiceLifecycle
         'paid' => [],
         'rejected' => [],
     ];
+
+    private const string ATTACHMENT_DISK = 'local';
 
     /**
      * Editovatelná pole přijaté faktury — odvozeno ze skutečného formuláře
@@ -113,9 +117,7 @@ final class ReceivedInvoiceLifecycle
         $this->assertOnlyKeys($attributes, self::EDITABLE_ATTRIBUTES, 'přijaté faktury');
 
         $this->mutate($invoice, function (ReceivedInvoice $locked) use ($attributes): void {
-            if (! in_array($locked->status, [ReceivedInvoiceStatus::Received, ReceivedInvoiceStatus::Approved], true)) {
-                throw InvalidStateTransition::because('Uhrazenou nebo zamítnutou fakturu nelze upravovat.');
-            }
+            $this->assertNotFinal($locked, 'Uhrazenou ani zamítnutou fakturu nelze upravovat.');
 
             $locked->forceFill($attributes);
             $changes = $locked->getDirty();
@@ -142,17 +144,15 @@ final class ReceivedInvoiceLifecycle
 
     /**
      * Smazání přijaté faktury včetně příloh. Stav se ověřuje nad zamčeným
-     * řádkem: uhrazenou fakturu nesmaže ani zastaralá instance, která ji
-     * načetla před markPaid().
+     * řádkem: fakturu ve finálním stavu (uhrazenou ani zamítnutou) nesmaže
+     * ani zastaralá instance, která ji načetla před přechodem.
      */
     public function delete(ReceivedInvoice $invoice): void
     {
         $attachmentPaths = [];
 
         $this->mutate($invoice, function (ReceivedInvoice $locked) use (&$attachmentPaths): void {
-            if ($locked->status === ReceivedInvoiceStatus::Paid) {
-                throw InvalidStateTransition::because('Uhrazenou fakturu nelze smazat.');
-            }
+            $this->assertNotFinal($locked, 'Uhrazenou ani zamítnutou fakturu nelze smazat.');
 
             $attachments = $locked->attachments()->withoutGlobalScope('organization')->get();
             $attachmentPaths = $attachments->pluck('stored_path')->all();
@@ -176,6 +176,74 @@ final class ReceivedInvoiceLifecycle
         // a úklidem je menší zlo (bez odkazu z DB) než chybějící příloha.
         foreach ($attachmentPaths as $path) {
             Storage::disk('local')->delete($path);
+        }
+    }
+
+    /**
+     * Přidání přílohy. Pořadí je zásadní: transakce → tenant-scoped
+     * zamčení → kontrola AKTUÁLNÍHO stavu → teprve pak zápis souboru →
+     * DB záznam → audit → commit. Dřív se soubor ukládal jako první,
+     * takže odmítnutá příloha po sobě nechala osiřelý soubor na disku.
+     *
+     * Filesystem není součástí DB transakce, proto navíc kompenzace:
+     * když cokoli po zápisu souboru selže, soubor se smaže.
+     *
+     * @throws InvalidStateTransition|InvoiceNotFound|AttachmentStorageFailed
+     */
+    public function attach(ReceivedInvoice $invoice, UploadedFile $file): ReceivedInvoiceAttachment
+    {
+        $storedPath = null;
+        $attachment = null;
+
+        try {
+            $this->mutate($invoice, function (ReceivedInvoice $locked) use ($file, &$storedPath, &$attachment): void {
+                $this->assertNotFinal($locked, 'K uhrazené ani zamítnuté faktuře nelze přidat přílohu.');
+
+                $path = $file->store('attachments/org-'.$locked->organization_id, self::ATTACHMENT_DISK);
+
+                if (! is_string($path) || $path === '') {
+                    throw AttachmentStorageFailed::forUpload($file->getClientOriginalName());
+                }
+
+                $storedPath = $path;
+
+                if (! Storage::disk(self::ATTACHMENT_DISK)->exists($path)) {
+                    throw AttachmentStorageFailed::forUpload($file->getClientOriginalName());
+                }
+
+                $attachment = $locked->attachments()->create([
+                    'organization_id' => $locked->organization_id,
+                    'original_filename' => $file->getClientOriginalName(),
+                    'stored_path' => $path,
+                    'mime_type' => $file->getMimeType() ?? 'application/octet-stream',
+                    'size_bytes' => $file->getSize() ?: 0,
+                ]);
+
+                $this->auditLogger->log('invoice.attachment_added', $locked, [
+                    'original_filename' => $attachment->original_filename,
+                    'size_bytes' => $attachment->size_bytes,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            // DB je odvalená; soubor by bez tohoto úklidu zůstal osiřelý.
+            if ($storedPath !== null) {
+                Storage::disk(self::ATTACHMENT_DISK)->delete($storedPath);
+            }
+
+            throw $e;
+        }
+
+        return $attachment;
+    }
+
+    /**
+     * Finalitu určuje JEDINÝ zdroj pravdy ReceivedInvoice::FINAL_STATUSES
+     * a posuzuje se nad ZAMČENÝM řádkem, ne nad instancí volajícího.
+     */
+    private function assertNotFinal(ReceivedInvoice $locked, string $message): void
+    {
+        if ($locked->isFinal()) {
+            throw InvalidStateTransition::because($message);
         }
     }
 

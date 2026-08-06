@@ -11,7 +11,6 @@ use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\ReceivedInvoiceLifecycle;
 use App\Domain\Money\Money;
 use App\Enums\ContactType;
-use App\Enums\ReceivedInvoiceStatus;
 use App\Http\Requests\ReceivedInvoiceRequest;
 use App\Models\Contact;
 use App\Models\Project;
@@ -28,8 +27,7 @@ class ReceivedInvoiceController extends Controller
     public function __construct(
         private readonly ReceivedInvoiceLifecycle $lifecycle,
         private readonly SupplierResolver $supplierResolver,
-    ) {
-    }
+    ) {}
 
     public function index(Request $request): View
     {
@@ -52,14 +50,17 @@ class ReceivedInvoiceController extends Controller
         return view('received.create', array_merge($this->formOptions(), ['invoice' => null]));
     }
 
-    public function store(ReceivedInvoiceRequest $request, AttachmentController $attachments): RedirectResponse
+    public function store(ReceivedInvoiceRequest $request): RedirectResponse
     {
-        $invoice = DB::transaction(function () use ($request) {
-            return ReceivedInvoice::create($this->data($request));
-        });
+        // Dodavatel se řeší PŘED transakcí: resolver si sám hlídá souběh
+        // a nesmí běžet uvnitř cizí transakce (viz CustomerResolver).
+        $data = $this->data($request);
+
+        $invoice = DB::transaction(fn () => ReceivedInvoice::create($data));
 
         if ($request->hasFile('attachment')) {
-            $attachments->attach($invoice, $request->file('attachment'));
+            // Vlastní transakce se zámkem a kompenzačním úklidem souboru.
+            $this->lifecycle->attach($invoice, $request->file('attachment'));
         }
 
         return redirect()->route('received.show', $invoice)
@@ -138,9 +139,13 @@ class ReceivedInvoiceController extends Controller
         return redirect()->route('received.show', $received)->with('status', $message);
     }
 
+    /**
+     * Jen pro rozhodnutí, zda ukázat formulář — o skutečné mutaci
+     * rozhoduje zamčený řádek v lifecycle vrstvě.
+     */
     private function isEditable(ReceivedInvoice $received): bool
     {
-        return in_array($received->status, [ReceivedInvoiceStatus::Received, ReceivedInvoiceStatus::Approved], true);
+        return ! $received->isFinal();
     }
 
     /**

@@ -321,8 +321,8 @@ class StaleReceivedInvoiceTest extends TestCase
         sort($declared);
 
         $safe = [
-            'attachments', 'contact', 'isOverdue', 'payments', 'persistedStatus',
-            'project', 'scopeOverdue', 'totalMoney',
+            'attachments', 'contact', 'isFinal', 'isFinalStatus', 'isOverdue',
+            'payments', 'persistedStatus', 'project', 'scopeOverdue', 'totalMoney',
         ];
 
         $this->assertSame([], array_diff($declared, $safe));
