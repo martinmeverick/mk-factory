@@ -70,10 +70,46 @@ Odběratelem je **převážně fyzická osoba bez IČO**, což určuje způsob p
 Pořadí klíčů:
 
 1. **`external_id`** — id zákazníka v e-shopu. Jediný spolehlivý klíč,
-   unikátní v rámci organizace. Integrace ho má posílat vždy.
+   unikátní v rámci organizace. **U Jabka (a každá další integrace) ho MUSÍ
+   posílat vždy** — e-mail je slabý fallback pro ruční/nedokonalé vstupy,
+   ne párovací mechanismus, se kterým smí integrace počítat.
 2. **IČO** — jen u firemních objednávek bez `external_id`.
 3. **e-mail** — jen bez `external_id` i IČA a jen při právě jedné shodě.
 4. jinak se založí nový kontakt.
+
+**E-mail NENÍ stabilní primární identita.** Jednu adresu legitimně sdílí
+víc osob (domácnost, firma), osoba může adresu změnit a tatáž adresa se
+může vyskytovat v různých velikostech písmen. Proto e-mail nemá unikátní
+index, párování jím platí jen při právě jedné shodě a při více shodách
+resolver vyhodí `AmbiguousCustomerMatch` — kontrolovaná ambiguita je
+lepší než náhodné sloučení dvou osob.
+
+#### Kanonizace e-mailu
+
+Před hledáním i uložením se e-mail kanonizuje: **trim + lowercase**
+(UTF-8 bezpečně, `mb_strtolower`). Porovnává se kanonicky na obou stranách
+(`LOWER(email)`), takže `User@Example.com` a `user@example.com` jsou táž
+hodnota i proti ručně založeným kontaktům. Nic víc se NEDĚLÁ — žádné
+odstraňování gmailových teček, `+tagů` ani přepisy domén: takové úpravy by
+slepily odlišné adresy.
+
+#### Souběh email-only požadavků
+
+Dva souběžné požadavky bez `external_id` a IČO se stejným e-mailem dřív
+mohly založit dva kontakty (lookup obou proběhl před insertem toho
+druhého; unikátní index tu z principu není). Email-only větev proto drží
+**tenant-scoped aplikační zámek** nad kanonickým e-mailem (MariaDB
+`GET_LOCK`, název = hash organizace + e-mailu, timeout 10 s): lookup
+a případné založení jsou serializované a druhý požadavek po získání zámku
+najde kontakt založený prvním. Stejný e-mail v jiné organizaci se
+neblokuje (zámek nese tenant). Nedostupnost zámku končí výjimkou, ne
+duplicitou. Ověřeno deterministickým MariaDB testem
+(`CustomerResolverConcurrencyTest`). Silnější klíče zámek nepotřebují —
+kryjí je unikátní indexy `(organization_id, external_id)` /
+`(organization_id, ico)` a ošetřený `UniqueConstraintViolationException`
+retry. Zámek serializuje resolver vůči resolveru; souběh s RUČNÍM
+založením kontaktu v UI pod ním nespadá (přiznané omezení — vyřeší ho
+až případná kanonizace na úrovni celé aplikace).
 
 Pořadí je STRIKTNÍ — slabší klíč nikdy nezachraňuje neúspěch silnějšího:
 

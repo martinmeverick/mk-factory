@@ -80,6 +80,13 @@ s vlastním DB spojením:
 composer test:concurrency
 ```
 
+Souběh je **deterministický**: workery se synchronizují bariérou
+(socketpair). Každý dokončí přípravu, ohlásí rodiči `READY` a čeká;
+rodič potvrdí připravenost všech a současně je uvolní `GO` do kritické
+sekce. Rodič se od DB odpojuje před forkem, potomci tedy nezdědí žádné
+PDO a otevírají si vlastní spojení (hlídá `ForkIsolationTest`); worker,
+který bariéru nezavolá, test srozumitelně shodí.
+
 Předpoklady:
 
 - běžící MariaDB/MySQL a databáze `mk_factory_test`:
@@ -88,11 +95,13 @@ Předpoklady:
 /Applications/XAMPP/xamppfiles/bin/mysql -u root -e "CREATE DATABASE IF NOT EXISTS mk_factory_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 ```
 
-- PHP rozšíření `pcntl` (bez něj se testy přeskočí, ne tiše „projdou“).
+- PHP rozšíření `pcntl` a `posix` (bez nich se testy přeskočí, ne tiše
+  „projdou“).
 
 Konfigurace je v `phpunit.concurrency.xml`; sada si databázi sama migruje
-(`migrate:fresh`), takže **nepoužívejte produkční databázi**. Co pokrývá,
-je popsáno v `docs/INVOICE_LIFECYCLE.md` (sekce Souběh).
+(`migrate:fresh`), takže **nepoužívejte produkční databázi** — testy běží
+výhradně proti izolované `mk_factory_test`. Co pokrývá, je popsáno
+v `docs/INVOICE_LIFECYCLE.md` (sekce Souběh).
 
 ## Generovaná PDF a soubory
 

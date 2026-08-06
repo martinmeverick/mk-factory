@@ -34,13 +34,27 @@ Zámky jsou ověřené skutečnými procesy nad MariaDB, ne domněnkou:
 `composer test:concurrency` (viz README). SQLite `SELECT … FOR UPDATE`
 ignoruje, takže hlavní sada souběh **neprokazuje**.
 
+Souběžné testy jsou **deterministické**: workery se synchronizují bariérou
+(socketpair mezi rodičem a potomky). Každý worker dokončí přípravu — vlastní
+DB spojení, načtení modelů — ohlásí `READY` a blokuje; rodič potvrdí
+připravenost VŠECH a teprve pak je současně uvolní `GO` do kritické sekce.
+Rodič se od DB odpojuje PŘED forkem, takže potomci žádné PDO nezdědí
+a každý si otevírá vlastní spojení (hlídá `ForkIsolationTest`). Worker,
+který bariéru nezavolá, test shodí — překryv nikdy nestojí na náhodě
+plánovače.
+
 Zaručené chování:
 - dvě souběžné platby 4 000 a 3 000 → dvě platby, `paid_amount_minor` 7 000,
 - dvojitý `markPaid()` → právě jeden doplatek, uhrazeno nepřekročí celkem,
 - dvojité vystavení → jedno spotřebované číslo, jeden přechod,
 - souběh vystavení a smazání → vystavenou fakturu nelze odstranit,
 - protichůdné přechody se serializují, druhý je odmítnut podle aktuálního
-  stavu.
+  stavu,
+- přijaté faktury: dvojitý `markPaid()` → jedna platba; souběh
+  `markPaid()` s update/delete skončí konzistentně (uhrazenou fakturu už
+  stale operace nezmění ani nesmaže),
+- email-only párování zákazníka nevytvoří duplicitní kontakt
+  (viz INTEGRATION_CONTRACT.md).
 
 Číselná řada má vlastní zámek, ale **není zámkem faktury** — obojí je
 potřeba.
@@ -103,6 +117,18 @@ souběžné volání nevytvoří druhý doplatek; už uhrazená faktura skončí
 řádkem — controller ji podle dřív načtené instance neposuzuje. Souběh
 vystavení a smazání se tím serializuje a vystavenou fakturu nelze odstranit.
 
+`updateDraft(header, items)` má **uzavřený kontrakt**: hlavička přijímá
+POUZE editovatelná pole formuláře (contact_id, project_id, bank_account_id,
+number_series_id, issue_date, due_date, tax_date, variable_symbol, note,
+internal_note, currency), položky pouze description, quantity, unit,
+unit_price_minor, vat_rate a line_* součty (ty stejně přepočítá
+kalkulačka). Klíč mimo whitelist — `organization_id`, `status`,
+`invoice_number`, `paid_amount_minor`, snapshoty, timestampy, cokoli
+neznámého — končí `InvalidArgumentException` PŘED transakcí: nezapíše se
+nic, ani legitimní část změny. Tiché ignorování by skrylo programátorskou
+chybu volajícího. `position` a `organization_id` položek doplňuje výhradně
+lifecycle služba z hodnot zamčené faktury.
+
 ### cancel(IssuedInvoice)
 Jen z issued a jen bez evidovaných plateb. cancelled_at = now, audit
 `invoice.cancelled`. Číslo faktury zůstává spotřebované (řada se nevrací) —
@@ -120,19 +146,42 @@ bank_account_snapshot, footer_text, note, logo_snapshot_path.
 Povolené i po vystavení: status, paid_amount_minor, paid_at, cancelled_at,
 issued_at, internal_note, project_id (interní evidence, netiskne se).
 
-**Obecný escape hatch neexistuje.** Dřívější `allowLifecycleTransition()`
-byl odstraněn — jakýkoli kód jím mohl vypnout ochranu. Chráněné atributy
-zapisují jen úzce vymezené operace s whitelistem: `applyIssued()` (jen
-atributy vystavení), `applyPaymentState()` (jen stav úhrady) a
-`applyCancelled()`. Nelze jimi změnit organization_id, položky ani
-libovolný atribut.
+**Obecný escape hatch neexistuje a lifecycle pole nemají ŽÁDNOU veřejnou
+zápisovou cestu.** Dřívější `allowLifecycleTransition()` byl odstraněn už
+v minulém kole; veřejné metody `applyIssued()`/`applyPaymentState()`/
+`applyCancelled()` v tomto — `@internal` v PHPDoc není přístupový
+modifikátor a šly volat odkudkoli bez validace, zámku i auditu.
 
-Guard navíc čte stav z DATABÁZE, ne z instance — zastaralá draft instance
-tak po souběžném vystavení chráněné údaje nezmění ani doklad nesmaže.
-Guard je ale **defense-in-depth**; proti souběhu chrání zámek, ne on.
+Platí dvě vrstvy:
+
+1. **Lifecycle pole** (`status`, `invoice_number`, `paid_amount_minor`,
+   `issued_at`, `paid_at`, `cancelled_at`) odmítne `updating` guard při
+   KAŽDÉM veřejném zápisu (`update()`, `save()`, `forceFill()->save()`)
+   bez ohledu na stav dokladu — koncept tedy nelze „vystavit“ přímým
+   přepsáním stavu, nelze podvrhnout částku úhrady ani stornovat mimo
+   lifecycle. Jediná zápisová cesta je PRIVATE metoda
+   `persistLifecycleState()` s vlastním whitelistem (organization_id ani
+   položky jí neprojdou); `IssuedInvoiceLifecycle` se k ní váže přes
+   `Closure::bind` do scope modelu (obdoba friend třídy). Stejný vzor drží
+   `ReceivedInvoice` pro `status` + `paid_at`.
+2. **Chráněné atributy dokladu** (PROTECTED_ATTRIBUTES) guard odmítá po
+   vystavení, `organization_id` — tenant identitu — v každém stavu.
+
+Guard čte stav z DATABÁZE, ne z instance — zastaralá draft instance tak po
+souběžném vystavení chráněné údaje nezmění ani doklad nesmaže. Guard je ale
+**defense-in-depth**; proti souběhu chrání zámek, ne on. Framework cesty
+mimo Eloquent eventy (`DB::table()`, raw SQL, `Model::withoutEvents()`)
+guard z principu nevidí — neměnnost na úrovni databáze vynucená není
+(známá slabina č. 6 v REVIEW_BRIEF.md) a aplikační kód je nesmí používat
+k zápisu faktur.
 
 Položky (`IssuedInvoiceItem`): creating/updating/deleting hook vyhodí
 výjimku, pokud rodičovská faktura není draft.
+
+Platby (`Payment`): **append-only**. Vznikají výhradně v lifecycle
+službách; updating/deleting hook je odmítne vždy — jinak by se historie
+plateb rozešla s `paid_amount_minor` a stavem dokladu. Storno platby jako
+operace zatím neexistuje (FUTURE_BACKLOG.md).
 
 ## Číslování faktur (InvoiceNumberGenerator)
 
@@ -156,10 +205,33 @@ Uložené stavy: `received`, `approved`, `paid`, `rejected` (+ odvozený overdue
 `markPaid` nastaví paid_at (+ Payment záznam), `approve`/`reject` jen mění
 stav; vše přes `ReceivedInvoiceLifecycle` s auditem.
 
-Platí stejný vzor jako u vydaných faktur — transakce, tenant-scoped dotaz,
-`lockForUpdate()`, kontrola stavu nad zamčeným řádkem. Souběžné protichůdné
-přechody se tím serializují a druhý je odmítnut podle aktuálního stavu;
-dvojitý `markPaid` nevytvoří druhou platbu.
+**Také úprava a smazání jdou výhradně přes lifecycle** — controller nic
+nerozhoduje podle dřív načtené instance:
+
+- `updateDetails(invoice, attributes)` — whitelist editovatelných polí
+  (contact_id, project_id, supplier_invoice_number, variable_symbol,
+  issue_date, received_date, due_date, total_minor, vat_minor, currency,
+  note); neznámý klíč, tenant i stavová pole končí
+  `InvalidArgumentException` před transakcí. Editovatelné jsou jen stavy
+  received/approved — rozhoduje ZAMČENÝ řádek, takže stale instance po
+  cizím `markPaid()` doklad nezmění. Audit `invoice.updated` s diffem.
+- `delete(invoice)` — uhrazenou fakturu nesmaže (kontrola nad zamčeným
+  řádkem); přílohy maže v téže transakci, jejich soubory až PO commitu
+  (rollback nesmí nechat záznamy bez souborů). Audit `invoice.deleted`.
+
+Model má stejné guardy jako vydaná faktura: `status` a `paid_at` mají
+jedinou (privátní) zápisovou cestu lifecycle služby, `organization_id` je
+neměnné vždy a fakturu ve FINÁLNÍM stavu (paid, rejected) `updating` guard
+odmítne změnit celou — podle stavu v DATABÁZI, ne podle instance. `deleting`
+guard odmítne smazat uhrazenou fakturu. Uhrazenou fakturu tedy nelze ani
+vrátit do předchozího stavu, ani přesunout mezi organizacemi. Přílohy
+uhrazené faktury jsou zmrazené (creating/updating/deleting guard na
+`ReceivedInvoiceAttachment`).
+
+Souběžné protichůdné operace se serializují zámkem řádku a druhá je
+odmítnuta podle aktuálního stavu; dvojitý `markPaid` nevytvoří druhou
+platbu, `markPaid` vs. update/delete končí konzistentně (ověřeno MariaDB
+sadou `ReceivedInvoiceConcurrencyTest`).
 
 ## QR platba podle stavu (PDF)
 
@@ -182,3 +254,27 @@ Při vystavení se logo organizace zmrazí KOPIÍ do `invoice-logos/org-{id}/`
 do `logo_snapshot_path`. Pozdější změna ani smazání firemního loga proto
 historický doklad nezmění. Koncept se renderuje z aktuálního loga
 organizace; snapshot se vykreslí jen pro vlastní organizaci.
+
+### Konzistence souboru a databáze — kompenzace, ne společná transakce
+
+Filesystem a MariaDB **společný commit nemají** a nic to nepředstírá.
+Drží se kompenzační protokol:
+
+1. soubor snapshotu vzniká UVNITŘ zamčené transakce vystavení, ale PŘED
+   spotřebováním čísla řady a PŘED zápisem lifecycle polí; cesta je
+   unikátní pro (organizaci, fakturu, otisk obsahu),
+2. výsledek zápisu se OVĚŘUJE — `put()` vracející false, výjimka adaptéru
+   i nečitelný zdroj končí `LogoSnapshotFailed` a vystavení se zastaví
+   (faktura s logem organizace se bez snapshotu nevystaví; cesta se nikdy
+   neuloží bez existujícího souboru),
+3. selže-li COKOLI dalšího v transakci, DB se odvalí a `issue()`
+   kompenzačně smaže soubor vytvořený tímto pokusem (`discard()`).
+
+**Zbývající failure window** (přiznané): spadne-li PROCES mezi zápisem
+souboru a DB commitem, kompenzace se nespustí a zůstane **osiřelý soubor**
+— bez odkazu z DB, faktura zůstává konceptem. Je to bezpečný směr: opačný
+stav (vystavený doklad odkazující na chybějící soubor) vzniknout nemůže,
+protože cesta se ukládá jen v transakci, která existenci souboru ověřila.
+Osiřelý soubor další pokus o vystavení přepíše stejným obsahem (stejná
+cesta z otisku); ruční úklid = smazat soubory `invoice-logos/…`, na které
+neukazuje žádný `logo_snapshot_path`.

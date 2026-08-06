@@ -14,7 +14,7 @@ základních funkcí iDokladu) pro firmu, která ho bude používat napříč n�
 projekty. První reálné nasazení: projekt **U Jabka**; dále mk-systems,
 Simona Vojtěšková, MEX, Cashflow.
 
-Stav: **MVP foundation po opravě nálezů z prvního nezávislého review** —
+Stav: **MVP foundation po třech kolech nezávislého review** —
 funkční vertikální průřez organizace → odběratel → faktura → vystavení →
 PDF → QR platba, plus přijaté faktury, projekty, dashboard a napojení na
 registr ARES.
@@ -22,10 +22,12 @@ registr ARES.
 **Aplikace zatím nebyla použita na skutečné faktury.** Review je předstupeň
 tohoto rozhodnutí.
 
-> **Pro opakované review:** devět nálezů z prvního kola je opraveno a každý
-> má regresní test, u kterého bylo ověřeno, že bez opravy selže. Přehled je
-> v části 7. Nálezy z části 6 (známé slabiny) opravené NEJSOU — jsou to
-> vědomá omezení, ne regrese.
+> **Pro opakované review:** devět nálezů z kola 2 i nálezy z re-review
+> (kolo 3 — lifecycle bypassy, kontrakt updateDraft, přijaté faktury,
+> deterministický souběh, email-only párování, snapshot loga, PHP_INT_MIN)
+> je opraveno a každý má regresní test, u kterého bylo ověřeno, že bez
+> opravy selže. Přehled je v části 7. Nálezy z části 6 (známé slabiny)
+> opravené NEJSOU — jsou to vědomá omezení, ne regrese.
 
 ### Vědomě mimo rozsah
 Bankovní API a párování plateb, OCR, datová schránka, odesílání e-mailem,
@@ -67,7 +69,9 @@ sahat na síť** — `Tests\TestCase` volá `Http::preventStrayRequests()`.
 **Souběh se na SQLite ověřit nedá** — `SELECT … FOR UPDATE` je tam no-op.
 Testy zámků proto běží odděleně proti MariaDB (databáze `mk_factory_test`,
 konfigurace `phpunit.concurrency.xml`) ve skutečně samostatných procesech
-přes `pcntl_fork`. Bez rozšíření `pcntl` se přeskočí — nikdy se netváří
+přes `pcntl_fork`, synchronizovaných deterministickou bariérou (workery
+vstupují do kritické sekce současně, až když rodič potvrdí připravenost
+všech). Bez rozšíření `pcntl`/`posix` se přeskočí — nikdy se netváří
 jako splněné. Postup je v README.
 
 ---
@@ -156,15 +160,22 @@ fakturu zamyká lifecycle zvlášť (viz 4.0). Co ruční změna `next_number`
 v nastavení? Co storno — číslo se schválně nevrací do řady. Neplatný doklad
 (nulový/záporný součet) číslo spotřebovat nesmí.
 
-### 4.4 Neměnnost vystavené faktury
+### 4.4 Neměnnost vystavené faktury a lifecycle polí
 `IssuedInvoice::PROTECTED_ATTRIBUTES` + `updating` hook (čte stav
 z DATABÁZE, ne z instance), `deleting` hook, guardy `IssuedInvoiceItem`.
-Chráněné atributy zapisují jen úzce vymezené operace `applyIssued()`,
-`applyPaymentState()`, `applyCancelled()` — obecný escape hatch neexistuje.
+Lifecycle pole (`status`, `invoice_number`, `paid_amount_minor`,
+`issued_at`, `paid_at`, `cancelled_at`) nemají ŽÁDNOU veřejnou zápisovou
+cestu — jediná je privátní `persistLifecycleState()`, ke které se lifecycle
+služba váže přes `Closure::bind` (dřívější veřejné `applyIssued()`/
+`applyPaymentState()`/`applyCancelled()` byly odstraněny, `@internal`
+v PHPDoc není přístupový modifikátor). Totéž drží `ReceivedInvoice`
+(status, paid_at + finalita paid/rejected) a `Payment` je append-only.
 
 Lze to obejít přes `forceFill`, query builder (`items()->delete()`),
-`DB::table()` nebo hromadný update? Umí některá z vymezených operací zapsat
-víc, než má? Pozor: guard je defense-in-depth, proti souběhu chrání zámek.
+`DB::table()` nebo hromadný update? Umí interní zápis přijmout víc, než
+má? Pozor: guard je defense-in-depth, proti souběhu chrání zámek; cesty
+mimo Eloquent eventy (`DB::table()`, raw SQL, `withoutEvents()`) guard
+z principu nevidí — viz známá slabina 6.
 
 ### 4.5 Uploady
 Logo organizace a přílohy přijatých faktur, privátní disk
@@ -265,6 +276,22 @@ změny). Nejnázornější doklady: bez zámku skončí souběžné platby 4 000
 na `paid_amount_minor` = 3 000 a souběh vystavení a smazání vystavenou
 fakturu odstraní; bez kontroly rozsahu se uloží `9223372036854775807`.
 
+### Kolo 3 — re-review oprav (3× PARTIAL, 1× OPEN → uzavřeno)
+
+Nezávislé re-review kola 2 potvrdilo 5 nálezů jako CLOSED a reprodukovalo
+zbývající slabiny. Všechny jsou opravené a mají regresní test, u kterého
+bylo ověřeno, že bez opravy selže:
+
+| Nález re-review | Oprava | Regresní test |
+|---|---|---|
+| Veřejné `applyIssued()`/`applyPaymentState()`/`applyCancelled()` obcházely lifecycle | odstraněny; jediná cesta je privátní `persistLifecycleState()` + guard lifecycle polí pro každý veřejný zápis | `LifecycleBypassTest` |
+| `updateDraft()` přijímal neomezené pole (šlo změnit organization_id, invoice_number…) | explicitní whitelist hlavičky i položek, neznámý klíč = výjimka před transakcí | `UpdateDraftContractTest` |
+| Stale instance mohla změnit i smazat uhrazenou přijatou fakturu | update/delete přes lifecycle (zamčený řádek) + modelové guardy podle stavu v DB; přílohy uhrazené faktury zmrazené; platby append-only | `StaleReceivedInvoiceTest`, `ReceivedInvoiceConcurrencyTest` (MariaDB) |
+| Concurrency testy bez deterministické synchronizace | socketpair bariéra READY/GO, rodič se odpojuje před forkem, workery mají prokazatelně vlastní spojení | `ConcurrencyTestCase`, `ForkIsolationTest` |
+| Souběžné email-only párování vytvořilo duplicitní kontakty; e-mail nekanonizovaný | trim+lowercase kanonizace při hledání i ukládání, tenant-scoped `GET_LOCK` nad kanonickým e-mailem | `CustomerResolverTest`, `CustomerResolverConcurrencyTest` (MariaDB; bez opravy vzniknou 2 kontakty) |
+| Snapshot loga: ignorovaný výsledek `put()`, žádná kompenzace po rollbacku | ověřený zápis (`LogoSnapshotFailed`), kompenzační `discard()` po rollbacku, přiznané failure window | `LogoSnapshotConsistencyTest` |
+| `abs(PHP_INT_MIN)` přetékalo do floatu při formátování | `toDecimalString()`/`formatCzech()` čistě přes řetězce | `MoneyBoundaryFormattingTest` |
+
 **Kde hledat dál:** oblasti kolem oprav (nové cesty, které vzor obcházejí),
 a místa, kde testy ověřují doménu, ale ne skutečný HTTP průchod.
 
@@ -301,8 +328,7 @@ a upozornění na **chybějící test kritického chování**.
 | Umístění | `/Applications/XAMPP/xamppfiles/htdocs/mk-factory` |
 | Repozitář | `github.com/martinmeverick/mk-factory` (privátní) |
 | Větev | `feature/invoicing-mvp-foundation` (do `main` nic nemergováno) |
-| Poslední commit | `b006b6a` |
-| Verzovaných souborů | 199 (bez `vendor/`) |
-| Testy (SQLite) | `composer test` — 252 testů / 583 asercí |
-| Testy souběhu (MariaDB) | `composer test:concurrency` — 5 testů / 17 asercí |
+| Stav | HEAD větve po opravách z re-review (kolo 3, viz část 7) |
+| Testy (SQLite) | `composer test` — 307 testů / 776 asercí |
+| Testy souběhu (MariaDB) | `composer test:concurrency` — 12 testů / 46 asercí, deterministická bariéra |
 | Migrace | 19 (z toho 3 skeletonové Laravelu) |
