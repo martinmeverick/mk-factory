@@ -10,6 +10,7 @@ use App\Models\IssuedInvoice;
 use App\Models\IssuedInvoiceItem;
 use App\Models\Project;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class ImmutabilityTest extends TestCase
@@ -102,8 +103,7 @@ class ImmutabilityTest extends TestCase
             'organization_id' => $invoice->organization_id,
         ]);
 
-        // Přechod draft → issued přímou změnou (původní stav draft => povoleno).
-        $invoice->update(['status' => IssuedInvoiceStatus::Issued]);
+        $this->forceStatusInDatabase($invoice, IssuedInvoiceStatus::Issued);
 
         $this->expectException(ImmutableInvoiceViolation::class);
 
@@ -118,11 +118,21 @@ class ImmutabilityTest extends TestCase
             'organization_id' => $invoice->organization_id,
         ]);
 
-        $invoice->update(['status' => IssuedInvoiceStatus::Issued]);
+        $this->forceStatusInDatabase($invoice, IssuedInvoiceStatus::Issued);
 
         $this->expectException(ImmutableInvoiceViolation::class);
 
         $item->delete();
+    }
+
+    /**
+     * Testovací setup: stav se podvrhne přímo v DB query builderem.
+     * Eloquent cesta to už neumí — stav mění výhradně lifecycle služba —
+     * a přesně proto tu setup obchází model, ne aplikační API.
+     */
+    private function forceStatusInDatabase(IssuedInvoice $invoice, IssuedInvoiceStatus $status): void
+    {
+        DB::table('issued_invoices')->where('id', $invoice->id)->update(['status' => $status->value]);
     }
 
     public function test_items_of_draft_are_editable(): void

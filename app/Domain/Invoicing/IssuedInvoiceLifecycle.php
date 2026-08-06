@@ -41,6 +41,44 @@ final class IssuedInvoiceLifecycle
         'cancelled' => [],
     ];
 
+    /**
+     * Editovatelná pole hlavičky konceptu — odvozeno ze skutečného formuláře
+     * (IssuedInvoiceRequest + IssuedInvoiceController::headerData()).
+     * Tenant identita, stav, číslo, částky dokladu, snapshoty ani časy
+     * přechodů sem NEPATŘÍ; klíč mimo whitelist je programátorská chyba
+     * volajícího a končí výjimkou, ne tichým ignorováním.
+     */
+    private const array DRAFT_HEADER_ATTRIBUTES = [
+        'contact_id',
+        'project_id',
+        'bank_account_id',
+        'number_series_id',
+        'issue_date',
+        'due_date',
+        'tax_date',
+        'variable_symbol',
+        'note',
+        'internal_note',
+        'currency',
+    ];
+
+    /**
+     * Editovatelná pole položky konceptu. Součty line_* přepočítává
+     * kalkulačka, controller je při zakládání nuluje — proto ve whitelistu
+     * jsou. position, organization_id a issued_invoice_id doplňuje výhradně
+     * tato služba.
+     */
+    private const array DRAFT_ITEM_ATTRIBUTES = [
+        'description',
+        'quantity',
+        'unit',
+        'unit_price_minor',
+        'vat_rate',
+        'line_subtotal_minor',
+        'line_vat_minor',
+        'line_total_minor',
+    ];
+
     public function __construct(
         private readonly InvoiceNumberGenerator $numberGenerator,
         private readonly InvoiceTotalsCalculator $totalsCalculator,
@@ -81,6 +119,10 @@ final class IssuedInvoiceLifecycle
 
             $this->assertPositiveTotal($locked);
 
+            // Logo se zmrazí kopií — pozdější změna či smazání firemního
+            // loga nesmí změnit historický doklad.
+            $capturedLogoPath = $this->logoSnapshots->capture($organization, $locked);
+
             $series = $locked->numberSeries()->withoutGlobalScope('organization')->firstOrFail();
             $number = $this->numberGenerator->nextNumber($series);
 
@@ -96,7 +138,7 @@ final class IssuedInvoiceLifecycle
             $dueDate = $locked->due_date
                 ?? $resolvedIssueDate->addDays($settings?->default_due_days ?? 14);
 
-            $locked->applyIssued([
+            $this->writeLifecycleState($locked, [
                 'status' => IssuedInvoiceStatus::Issued,
                 'invoice_number' => $number,
                 'variable_symbol' => $variableSymbol,
@@ -106,9 +148,7 @@ final class IssuedInvoiceLifecycle
                 'customer_snapshot' => $this->customerSnapshot($locked),
                 'bank_account_snapshot' => $this->bankAccountSnapshot($locked),
                 'footer_text' => $settings?->invoice_footer_text,
-                // Logo se zmrazí kopií — pozdější změna či smazání firemního
-                // loga nesmí změnit historický doklad.
-                'logo_snapshot_path' => $this->logoSnapshots->capture($organization, $locked),
+                'logo_snapshot_path' => $capturedLogoPath,
                 'issued_at' => now(),
             ]);
 
@@ -168,7 +208,10 @@ final class IssuedInvoiceLifecycle
             $previousStatus = $locked->status;
 
             // Číslo faktury zůstává spotřebované — řada se nevrací (auditní stopa).
-            $locked->applyCancelled(now());
+            $this->writeLifecycleState($locked, [
+                'status' => IssuedInvoiceStatus::Cancelled,
+                'cancelled_at' => now(),
+            ]);
 
             $this->auditLogger->log('invoice.cancelled', $locked, [
                 'status' => ['from' => $previousStatus->value, 'to' => IssuedInvoiceStatus::Cancelled->value],
@@ -201,6 +244,22 @@ final class IssuedInvoiceLifecycle
      */
     public function updateDraft(IssuedInvoice $invoice, array $header, array $items): void
     {
+        // Kontrakt se vynucuje PŘED transakcí: klíč mimo whitelist je chyba
+        // volajícího a shodí celé volání — nezapíše se nic, ani legitimní
+        // část změny.
+        $this->assertOnlyKeys($header, self::DRAFT_HEADER_ATTRIBUTES, 'hlavičky konceptu');
+
+        foreach (array_values($items) as $index => $item) {
+            if (! is_array($item)) {
+                throw new InvalidArgumentException(sprintf(
+                    'Položka konceptu č. %d musí být pole atributů.',
+                    $index + 1,
+                ));
+            }
+
+            $this->assertOnlyKeys($item, self::DRAFT_ITEM_ATTRIBUTES, sprintf('položky konceptu č. %d', $index + 1));
+        }
+
         $this->mutate($invoice, function (IssuedInvoice $locked) use ($header, $items): void {
             if ($locked->status !== IssuedInvoiceStatus::Draft) {
                 throw InvalidStateTransition::because('Upravovat lze pouze koncept faktury.');
@@ -268,17 +327,59 @@ final class IssuedInvoiceLifecycle
             $this->assertTransition($previousStatus, $newStatus);
         }
 
-        $locked->applyPaymentState(
-            $newPaidAmount->getMinor(),
-            $newStatus,
-            $newStatus === IssuedInvoiceStatus::Paid ? $paidOn : $locked->paid_at,
-        );
+        $this->writeLifecycleState($locked, [
+            'paid_amount_minor' => $newPaidAmount->getMinor(),
+            'status' => $newStatus,
+            'paid_at' => $newStatus === IssuedInvoiceStatus::Paid ? $paidOn : $locked->paid_at,
+        ]);
 
         $this->auditLogger->log('invoice.payment_registered', $locked, [
             'amount_minor' => $amountMinor,
             'paid_on' => $paidOn->toDateString(),
             'status' => ['from' => $previousStatus->value, 'to' => $newStatus->value],
         ]);
+    }
+
+    /**
+     * Interní zápis lifecycle polí nad ZAMČENÝM modelem. Váže se do
+     * privátního scope IssuedInvoice (obdoba friend třídy) — model žádnou
+     * veřejnou zápisovou metodu lifecycle polí nenabízí, takže běžný
+     * aplikační kód tuto cestu nemá. Pole každého zápisu jsou natvrdo
+     * vyjmenovaná v jednotlivých operacích výše; model navíc drží vlastní
+     * whitelist jako defense-in-depth.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function writeLifecycleState(IssuedInvoice $locked, array $attributes): void
+    {
+        \Closure::bind(
+            function (array $attributes): void {
+                /** @var IssuedInvoice $this */
+                $this->persistLifecycleState($attributes);
+            },
+            $locked,
+            IssuedInvoice::class,
+        )($attributes);
+    }
+
+    /**
+     * Klíče mimo whitelist jsou programátorská chyba volajícího — tiché
+     * ignorování by skrylo pokus zapsat organization_id, status a podobně.
+     *
+     * @param  array<string, mixed>  $attributes
+     * @param  list<string>  $allowed
+     */
+    private function assertOnlyKeys(array $attributes, array $allowed, string $subject): void
+    {
+        $unexpected = array_diff(array_keys($attributes), $allowed);
+
+        if ($unexpected !== []) {
+            throw new InvalidArgumentException(sprintf(
+                'Nepovolené atributy %s: %s.',
+                $subject,
+                implode(', ', $unexpected),
+            ));
+        }
     }
 
     /**

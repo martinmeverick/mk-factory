@@ -247,15 +247,21 @@ class StaleInvoiceInstanceTest extends TestCase
     }
 
     /**
-     * NÁLEZ 2: úzce vymezené operace neumí zapsat atribut mimo whitelist.
+     * NÁLEZ 2 + RE-REVIEW: interní zápis lifecycle služby neumí zapsat
+     * atribut mimo whitelist — ani tenant identitu. Test se do privátního
+     * scope váže stejně jako lifecycle (Closure::bind), protože veřejná
+     * zápisová metoda už neexistuje.
      */
-    public function test_issue_operation_rejects_attributes_outside_its_whitelist(): void
+    public function test_internal_lifecycle_write_rejects_attributes_outside_its_whitelist(): void
     {
         $invoice = $this->draft();
 
         $this->expectException(ImmutableInvoiceViolation::class);
 
-        $invoice->applyIssued(['organization_id' => 999]);
+        \Closure::bind(function (): void {
+            /** @var IssuedInvoice $this */
+            $this->persistLifecycleState(['organization_id' => 999]);
+        }, $invoice, IssuedInvoice::class)();
     }
 
     /**
