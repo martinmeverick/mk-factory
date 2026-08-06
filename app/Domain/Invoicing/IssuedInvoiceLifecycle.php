@@ -90,73 +90,90 @@ final class IssuedInvoiceLifecycle
 
     public function issue(IssuedInvoice $invoice, ?CarbonImmutable $issueDate = null): void
     {
-        $this->mutate($invoice, function (IssuedInvoice $locked) use ($issueDate): void {
-            $this->assertTransition($locked->status, IssuedInvoiceStatus::Issued);
+        $capturedLogoPath = null;
 
-            $organization = $locked->organization()->withoutGlobalScope('organization')->firstOrFail();
+        try {
+            $this->mutate($invoice, function (IssuedInvoice $locked) use ($issueDate, &$capturedLogoPath): void {
+                $this->assertTransition($locked->status, IssuedInvoiceStatus::Issued);
 
-            if ($locked->contact_id === null) {
-                throw InvoiceNotIssuable::because('není vyplněn odběratel.');
+                $organization = $locked->organization()->withoutGlobalScope('organization')->firstOrFail();
+
+                if ($locked->contact_id === null) {
+                    throw InvoiceNotIssuable::because('není vyplněn odběratel.');
+                }
+
+                if ($locked->number_series_id === null) {
+                    throw InvoiceNotIssuable::because('není vybrána číselná řada.');
+                }
+
+                // Bankovní účet je povinný, jen pokud organizace nějaký má.
+                if ($locked->bank_account_id === null
+                    && $organization->bankAccounts()->withoutGlobalScope('organization')->exists()) {
+                    throw InvoiceNotIssuable::because('není vybrán bankovní účet.');
+                }
+
+                if (! $locked->items()->withoutGlobalScope('organization')->exists()) {
+                    throw InvoiceNotIssuable::because('faktura nemá žádnou položku.');
+                }
+
+                // Přepočet PŘED validací součtu i před spotřebováním čísla řady:
+                // neplatný doklad nesmí číslo spotřebovat.
+                $this->totalsCalculator->recalculate($locked);
+
+                $this->assertPositiveTotal($locked);
+
+                // Logo se zmrazí kopií — pozdější změna či smazání firemního
+                // loga nesmí změnit historický doklad. Soubor vzniká PŘED
+                // spotřebováním čísla řady a jeho zápis se OVĚŘUJE: bez
+                // snapshotu se faktura nevystaví (LogoSnapshotFailed).
+                // Kompenzaci po rollbacku DB transakce dělá catch níže.
+                $capturedLogoPath = $this->logoSnapshots->capture($organization, $locked);
+
+                $series = $locked->numberSeries()->withoutGlobalScope('organization')->firstOrFail();
+                $number = $this->numberGenerator->nextNumber($series);
+
+                $variableSymbol = $locked->variable_symbol;
+
+                if ($variableSymbol === null || $variableSymbol === '') {
+                    // Číslice z čísla faktury, max 10 (zprava — zachová pořadovou část).
+                    $variableSymbol = substr((string) preg_replace('/\D/', '', $number), -10);
+                }
+
+                $settings = $organization->settings()->withoutGlobalScope('organization')->first();
+                $resolvedIssueDate = $issueDate ?? CarbonImmutable::today();
+                $dueDate = $locked->due_date
+                    ?? $resolvedIssueDate->addDays($settings?->default_due_days ?? 14);
+
+                $this->writeLifecycleState($locked, [
+                    'status' => IssuedInvoiceStatus::Issued,
+                    'invoice_number' => $number,
+                    'variable_symbol' => $variableSymbol,
+                    'issue_date' => $resolvedIssueDate,
+                    'due_date' => $dueDate,
+                    'supplier_snapshot' => $this->supplierSnapshot($organization),
+                    'customer_snapshot' => $this->customerSnapshot($locked),
+                    'bank_account_snapshot' => $this->bankAccountSnapshot($locked),
+                    'footer_text' => $settings?->invoice_footer_text,
+                    'logo_snapshot_path' => $capturedLogoPath,
+                    'issued_at' => now(),
+                ]);
+
+                $this->auditLogger->log('invoice.issued', $locked, [
+                    'status' => ['from' => IssuedInvoiceStatus::Draft->value, 'to' => IssuedInvoiceStatus::Issued->value],
+                    'invoice_number' => $number,
+                ]);
+            });
+        } catch (\Throwable $e) {
+            // Filesystem s DB společnou transakci NEMÁ — soubor snapshotu
+            // vzniklý tímto pokusem by po rollbacku zůstal osiřelý, proto se
+            // kompenzačně smaže. Po ÚSPĚŠNÉM commitu se sem kód nedostane,
+            // takže commitnutý doklad o soubor nikdy nepřijde.
+            if ($capturedLogoPath !== null) {
+                $this->logoSnapshots->discard($capturedLogoPath);
             }
 
-            if ($locked->number_series_id === null) {
-                throw InvoiceNotIssuable::because('není vybrána číselná řada.');
-            }
-
-            // Bankovní účet je povinný, jen pokud organizace nějaký má.
-            if ($locked->bank_account_id === null
-                && $organization->bankAccounts()->withoutGlobalScope('organization')->exists()) {
-                throw InvoiceNotIssuable::because('není vybrán bankovní účet.');
-            }
-
-            if (! $locked->items()->withoutGlobalScope('organization')->exists()) {
-                throw InvoiceNotIssuable::because('faktura nemá žádnou položku.');
-            }
-
-            // Přepočet PŘED validací součtu i před spotřebováním čísla řady:
-            // neplatný doklad nesmí číslo spotřebovat.
-            $this->totalsCalculator->recalculate($locked);
-
-            $this->assertPositiveTotal($locked);
-
-            // Logo se zmrazí kopií — pozdější změna či smazání firemního
-            // loga nesmí změnit historický doklad.
-            $capturedLogoPath = $this->logoSnapshots->capture($organization, $locked);
-
-            $series = $locked->numberSeries()->withoutGlobalScope('organization')->firstOrFail();
-            $number = $this->numberGenerator->nextNumber($series);
-
-            $variableSymbol = $locked->variable_symbol;
-
-            if ($variableSymbol === null || $variableSymbol === '') {
-                // Číslice z čísla faktury, max 10 (zprava — zachová pořadovou část).
-                $variableSymbol = substr((string) preg_replace('/\D/', '', $number), -10);
-            }
-
-            $settings = $organization->settings()->withoutGlobalScope('organization')->first();
-            $resolvedIssueDate = $issueDate ?? CarbonImmutable::today();
-            $dueDate = $locked->due_date
-                ?? $resolvedIssueDate->addDays($settings?->default_due_days ?? 14);
-
-            $this->writeLifecycleState($locked, [
-                'status' => IssuedInvoiceStatus::Issued,
-                'invoice_number' => $number,
-                'variable_symbol' => $variableSymbol,
-                'issue_date' => $resolvedIssueDate,
-                'due_date' => $dueDate,
-                'supplier_snapshot' => $this->supplierSnapshot($organization),
-                'customer_snapshot' => $this->customerSnapshot($locked),
-                'bank_account_snapshot' => $this->bankAccountSnapshot($locked),
-                'footer_text' => $settings?->invoice_footer_text,
-                'logo_snapshot_path' => $capturedLogoPath,
-                'issued_at' => now(),
-            ]);
-
-            $this->auditLogger->log('invoice.issued', $locked, [
-                'status' => ['from' => IssuedInvoiceStatus::Draft->value, 'to' => IssuedInvoiceStatus::Issued->value],
-                'invoice_number' => $number,
-            ]);
-        });
+            throw $e;
+        }
     }
 
     public function registerPayment(
