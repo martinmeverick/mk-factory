@@ -21,6 +21,11 @@ final class InvoiceLogoSnapshotStore
 {
     private const string DIRECTORY = 'invoice-logos';
 
+    /**
+     * Adresář, kam ukládá logo organizace nahrávací cesta v nastavení.
+     */
+    private const string LOGO_DIRECTORY = 'logos';
+
     private const string DISK = 'local';
 
     /**
@@ -36,8 +41,19 @@ final class InvoiceLogoSnapshotStore
     {
         $source = $organization->logo_path;
 
-        if ($source === null || ! Storage::disk(self::DISK)->exists($source)) {
+        // Organizace logo NENÍ nakonfigurované — legitimní stav, faktura se
+        // vystaví bez loga.
+        if ($source === null || trim($source) === '') {
             return null;
+        }
+
+        // Od téhle chvíle je logo POVINNÉ: organizace ho nakonfigurovala,
+        // takže doklad bez snapshotu by tiše ztratil část vzhledu a přitom
+        // spotřeboval číslo řady. Každá další chyba proto vystavení zastaví.
+        $this->assertUsableSourcePath($source, $organization);
+
+        if (! Storage::disk(self::DISK)->exists($source)) {
+            throw LogoSnapshotFailed::forMissingSource($source);
         }
 
         try {
@@ -46,7 +62,7 @@ final class InvoiceLogoSnapshotStore
             throw LogoSnapshotFailed::forSource($source, $e);
         }
 
-        if ($contents === null) {
+        if ($contents === null || $contents === '') {
             // Zdroj podle exists() existuje, ale přečíst nejde — doklad se
             // bez povinného snapshotu vystavit nesmí.
             throw LogoSnapshotFailed::forSource($source);
@@ -98,6 +114,28 @@ final class InvoiceLogoSnapshotStore
             Storage::disk(self::DISK)->delete($path);
         } catch (\Throwable) {
             // Neúspěšný úklid nesmí zamaskovat původní chybu vystavení.
+        }
+    }
+
+    /**
+     * Zdrojová cesta loga musí být relativní, bez traversalu a uvnitř
+     * adresáře vlastní organizace — tam ji ukládá nahrávání loga
+     * (OrganizationSettingsController). Cokoli jiného je poškozená nebo
+     * podvržená konfigurace a vystavení musí zastavit, ne zkopírovat
+     * neznámý soubor.
+     */
+    private function assertUsableSourcePath(string $source, Organization $organization): void
+    {
+        $expectedPrefix = sprintf('%s/org-%d/', self::LOGO_DIRECTORY, $organization->getKey());
+
+        $invalid = str_contains($source, "\0")
+            || str_contains($source, '..')
+            || str_starts_with($source, '/')
+            || preg_match('#^[a-zA-Z]:[\\\\/]#', $source) === 1
+            || ! str_starts_with($source, $expectedPrefix);
+
+        if ($invalid) {
+            throw LogoSnapshotFailed::forUnsafeSource($source, $expectedPrefix);
         }
     }
 

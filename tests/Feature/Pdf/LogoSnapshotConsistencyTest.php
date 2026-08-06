@@ -89,6 +89,19 @@ class LogoSnapshotConsistencyTest extends TestCase
         return $invoice;
     }
 
+    /**
+     * Koncept bez jakéhokoli nastaveného loga — organizace ho prostě nemá.
+     */
+    private function draftWithoutLogo(): IssuedInvoice
+    {
+        $invoice = $this->draftWithLogo();
+
+        Storage::disk('local')->delete('logos/org-'.$this->organization->id.'/logo.png');
+        $this->organization->update(['logo_path' => null]);
+
+        return $invoice;
+    }
+
     private function expectedSnapshotPath(IssuedInvoice $invoice, string $logoContents): string
     {
         return sprintf(
@@ -193,6 +206,101 @@ class LogoSnapshotConsistencyTest extends TestCase
         }
 
         $this->assertNothingIssued($invoice, $snapshotPath);
+    }
+
+    /**
+     * RE-REVIEW, nález 6: NENAKONFIGUROVANÉ logo je legitimní stav —
+     * faktura se vystaví bez snapshotu.
+     */
+    public function test_organization_without_a_logo_issues_normally(): void
+    {
+        Storage::fake('local');
+        $invoice = $this->draftWithoutLogo();
+
+        app(IssuedInvoiceLifecycle::class)->issue($invoice, CarbonImmutable::parse('2026-08-01'));
+
+        $fresh = IssuedInvoice::query()->findOrFail($invoice->id);
+
+        $this->assertSame(IssuedInvoiceStatus::Issued, $fresh->status);
+        $this->assertNotNull($fresh->invoice_number);
+        $this->assertNull($fresh->logo_snapshot_path, 'Bez loga nevzniká snapshot.');
+    }
+
+    /**
+     * RE-REVIEW, nález 6: logo NAKONFIGUROVANÉ, ale soubor chybí — dřív se
+     * tiše vrátilo null a faktura se vystavila bez loga (a spotřebovala
+     * číslo). Teď je to tvrdá chyba.
+     */
+    public function test_configured_but_missing_logo_stops_issuing(): void
+    {
+        Storage::fake('local');
+        $invoice = $this->draftWithLogo();
+
+        // Logo zmizí z disku, ale v nastavení organizace zůstává.
+        Storage::disk('local')->delete('logos/org-'.$this->organization->id.'/logo.png');
+
+        try {
+            app(IssuedInvoiceLifecycle::class)->issue($invoice, CarbonImmutable::parse('2026-08-01'));
+            $this->fail('Chybějící nakonfigurované logo musí vystavení zastavit.');
+        } catch (LogoSnapshotFailed $e) {
+            $this->assertStringContainsString('logo', mb_strtolower($e->getMessage()));
+        }
+
+        $this->assertNothingIssued($invoice, $this->expectedSnapshotPath($invoice, 'PNG-DATA'));
+    }
+
+    public function test_unreadable_configured_logo_stops_issuing(): void
+    {
+        $fake = Storage::fake('local');
+        $invoice = $this->draftWithLogo();
+
+        $failing = Mockery::mock($fake)->makePartial();
+        $failing->shouldReceive('get')->andThrow(new RuntimeException('I/O chyba.'));
+        Storage::set('local', $failing);
+
+        try {
+            app(IssuedInvoiceLifecycle::class)->issue($invoice, CarbonImmutable::parse('2026-08-01'));
+            $this->fail('Nečitelné logo musí vystavení zastavit.');
+        } catch (LogoSnapshotFailed $e) {
+            $this->assertInstanceOf(RuntimeException::class, $e->getPrevious());
+        }
+
+        Storage::set('local', $fake);
+
+        $this->assertNothingIssued($invoice, $this->expectedSnapshotPath($invoice, 'PNG-DATA'));
+    }
+
+    /**
+     * Cesta mimo adresář vlastní organizace (nebo s traversalem) se nesmí
+     * zkopírovat — Flysystem `..` normalizuje, takže samotný prefix nestačí.
+     */
+    public function test_unsafe_logo_path_stops_issuing(): void
+    {
+        foreach ([
+            'logos/org-'.($this->organization->id + 1).'/cizi.png',
+            'logos/org-'.$this->organization->id.'/../org-'.($this->organization->id + 1).'/cizi.png',
+            '/etc/passwd',
+            'attachments/org-'.$this->organization->id.'/faktura.pdf',
+        ] as $unsafePath) {
+            Storage::fake('local');
+            $invoice = $this->draftWithLogo();
+
+            Storage::disk('local')->put($unsafePath, 'CIZI-DATA');
+            $this->organization->update(['logo_path' => $unsafePath]);
+
+            try {
+                app(IssuedInvoiceLifecycle::class)->issue($invoice, CarbonImmutable::parse('2026-08-01'));
+                $this->fail("Nebezpečná cesta {$unsafePath} musí vystavení zastavit.");
+            } catch (LogoSnapshotFailed) {
+                // očekáváno
+            }
+
+            $this->assertSame(
+                IssuedInvoiceStatus::Draft,
+                IssuedInvoice::query()->findOrFail($invoice->id)->status,
+                "Faktura musí zůstat konceptem pro cestu {$unsafePath}.",
+            );
+        }
     }
 
     public function test_issued_invoice_never_references_a_missing_snapshot(): void

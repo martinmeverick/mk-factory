@@ -31,4 +31,27 @@ class LogoSnapshotFailed extends DomainException
             $previous,
         );
     }
+
+    /**
+     * Organizace logo NAKONFIGUROVANÉ má, ale soubor chybí. Vystavení se
+     * musí zastavit — jinak by doklad tiše vznikl bez loga a spotřeboval
+     * číslo řady. (Organizace bez loga je jiný, legitimní případ.)
+     */
+    public static function forMissingSource(string $sourcePath): self
+    {
+        return new self(sprintf(
+            'Organizace má nastavené logo "%s", ale soubor na disku není. '
+            .'Nahrajte logo znovu (nebo ho v nastavení odeberte) a fakturu vystavte potom.',
+            $sourcePath,
+        ));
+    }
+
+    public static function forUnsafeSource(string $sourcePath, string $expectedPrefix): self
+    {
+        return new self(sprintf(
+            'Cesta loga "%s" není použitelná — očekává se relativní cesta začínající "%s".',
+            $sourcePath,
+            $expectedPrefix,
+        ));
+    }
 }
