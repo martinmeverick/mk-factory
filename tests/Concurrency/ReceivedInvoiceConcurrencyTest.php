@@ -73,12 +73,12 @@ class ReceivedInvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-05'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-05'));
@@ -108,12 +108,12 @@ class ReceivedInvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-05'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->updateDetails($fresh, ['due_date' => '2027-01-01', 'total_minor' => 99999]);
@@ -149,12 +149,12 @@ class ReceivedInvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-05'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->delete($fresh);

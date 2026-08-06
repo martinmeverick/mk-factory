@@ -130,12 +130,12 @@ class InvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->registerPayment($fresh, 4000, CarbonImmutable::parse('2026-08-02'), 'A');
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->registerPayment($fresh, 3000, CarbonImmutable::parse('2026-08-02'), 'B');
@@ -170,12 +170,12 @@ class InvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-03'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-03'));
@@ -208,12 +208,12 @@ class InvoiceConcurrencyTest extends ConcurrencyTestCase
         $seriesId = $invoice->number_series_id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->issue($fresh, CarbonImmutable::parse('2026-08-01'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->issue($fresh, CarbonImmutable::parse('2026-08-01'));
@@ -239,12 +239,12 @@ class InvoiceConcurrencyTest extends ConcurrencyTestCase
         $invoiceId = $invoice->id;
 
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->issue($fresh, CarbonImmutable::parse('2026-08-01'));
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->deleteDraft($fresh);
@@ -284,12 +284,12 @@ class InvoiceConcurrencyTest extends ConcurrencyTestCase
 
         // Storno vs. plná úhrada — protichůdné přechody.
         $errors = $this->runInParallel([
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->cancel($fresh);
             },
-            function (callable $barrier) use ($invoiceId): void {
+            function (WorkerBarrier $barrier) use ($invoiceId): void {
                 [$lifecycle, $fresh] = $this->lifecycleFor($invoiceId);
                 $barrier();
                 $lifecycle->markPaid($fresh, CarbonImmutable::parse('2026-08-03'));
