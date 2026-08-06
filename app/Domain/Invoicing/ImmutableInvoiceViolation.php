@@ -76,16 +76,36 @@ class ImmutableInvoiceViolation extends DomainException
     public static function forReceivedDeletion(ReceivedInvoice $invoice): self
     {
         return new self(sprintf(
-            'Uhrazenou přijatou fakturu #%s nelze smazat.',
+            'Přijatou fakturu #%s nelze smazat: je uhrazená nebo zamítnutá.',
             $invoice->getKey() ?? '?',
         ));
     }
 
-    public static function forPaidReceivedAttachments(int $invoiceId): self
+    public static function forFinalReceivedAttachments(int $invoiceId): self
     {
         return new self(sprintf(
-            'Přílohy přijaté faktury #%d nelze měnit: faktura je uhrazená.',
+            'Přílohy přijaté faktury #%d nelze měnit: faktura je uhrazená nebo zamítnutá.',
             $invoiceId,
         ));
+    }
+
+    /**
+     * Přepnutí potomka pod jiného rodiče. Guard finálního stavu se ptá na
+     * PŮVODNÍHO rodiče, takže reparenting by z něj udělal zadní vrátka:
+     * položka vystavené faktury by se „přestěhovala“ na koncept a tím
+     * změnila historický doklad.
+     */
+    public static function forReparenting(string $subject, string $attribute): self
+    {
+        return new self(sprintf(
+            '%s nelze přesunout pod jiný doklad: atribut "%s" je po vytvoření neměnný.',
+            $subject,
+            $attribute,
+        ));
+    }
+
+    public static function forChildTenantChange(string $subject): self
+    {
+        return new self(sprintf('%s nelze přesunout do jiné organizace.', $subject));
     }
 }

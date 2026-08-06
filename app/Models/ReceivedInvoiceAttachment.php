@@ -5,13 +5,14 @@ namespace App\Models;
 use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Domain\Tenancy\BelongsToOrganization;
 use App\Enums\ReceivedInvoiceStatus;
+use Database\Factories\ReceivedInvoiceAttachmentFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ReceivedInvoiceAttachment extends Model
 {
-    /** @use HasFactory<\Database\Factories\ReceivedInvoiceAttachmentFactory> */
+    /** @use HasFactory<ReceivedInvoiceAttachmentFactory> */
     use BelongsToOrganization, HasFactory;
 
     protected $guarded = [];
@@ -25,31 +26,60 @@ class ReceivedInvoiceAttachment extends Model
 
     protected static function booted(): void
     {
-        // Přílohy uhrazené faktury jsou součást dokladu — nelze je přidat,
-        // změnit ani smazat. Stav rodiče se čte z DATABÁZE, ne z (možná
-        // zastaralé) načtené relace; stejný vzor jako IssuedInvoiceItem.
-        $guard = function (self $attachment): void {
-            $invoiceId = $attachment->received_invoice_id;
+        static::creating(function (self $attachment): void {
+            self::assertParentIsNotFinal($attachment->received_invoice_id);
+        });
 
-            if ($invoiceId === null) {
-                return;
+        static::updating(function (self $attachment): void {
+            // Vlastnická vazba je po vytvoření NEMĚNNÁ — jinak by šlo
+            // přílohu uhrazené faktury „přestěhovat“ pod nefinální doklad
+            // a guard by se pak ptal na stav toho nefinálního.
+            if ($attachment->isDirty('received_invoice_id')) {
+                throw ImmutableInvoiceViolation::forReparenting('Přílohu faktury', 'received_invoice_id');
             }
 
-            $status = ReceivedInvoice::query()
-                ->withoutGlobalScope('organization')
-                ->whereKey($invoiceId)
-                ->value('status');
-
-            $status = $status instanceof ReceivedInvoiceStatus ? $status->value : $status;
-
-            if ($status === ReceivedInvoiceStatus::Paid->value) {
-                throw ImmutableInvoiceViolation::forPaidReceivedAttachments((int) $invoiceId);
+            if ($attachment->isDirty('organization_id')) {
+                throw ImmutableInvoiceViolation::forChildTenantChange('Přílohu faktury');
             }
-        };
 
-        static::creating($guard);
-        static::updating($guard);
-        static::deleting($guard);
+            self::assertParentIsNotFinal($attachment->getOriginal('received_invoice_id'));
+        });
+
+        static::deleting(function (self $attachment): void {
+            self::assertParentIsNotFinal(
+                $attachment->getOriginal('received_invoice_id') ?? $attachment->received_invoice_id
+            );
+        });
+    }
+
+    /**
+     * Přílohy faktury ve FINÁLNÍM stavu (uhrazená i zamítnutá) jsou součást
+     * dokladu — nelze je přidat, změnit ani smazat. Finalitu určuje jediný
+     * zdroj pravdy ReceivedInvoice::FINAL_STATUSES a stav se čte z DATABÁZE,
+     * ne z (možná zastaralé) načtené relace.
+     */
+    private static function assertParentIsNotFinal(mixed $invoiceId): void
+    {
+        if ($invoiceId === null) {
+            return;
+        }
+
+        $status = ReceivedInvoice::query()
+            ->withoutGlobalScope('organization')
+            ->whereKey($invoiceId)
+            ->value('status');
+
+        if ($status === null) {
+            return;
+        }
+
+        $status = $status instanceof ReceivedInvoiceStatus
+            ? $status
+            : ReceivedInvoiceStatus::from((string) $status);
+
+        if (ReceivedInvoice::isFinalStatus($status)) {
+            throw ImmutableInvoiceViolation::forFinalReceivedAttachments((int) $invoiceId);
+        }
     }
 
     public function receivedInvoice(): BelongsTo
