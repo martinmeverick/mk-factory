@@ -12,9 +12,12 @@ use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\IssuedInvoiceStatus;
 use App\Models\BankAccount;
 use App\Models\Contact;
+use App\Models\InvoiceNumberSeries;
 use App\Models\IssuedInvoice;
 use App\Models\Organization;
+use App\Models\Project;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
@@ -79,14 +82,29 @@ final class IssuedInvoiceLifecycle
         'line_total_minor',
     ];
 
+    /**
+     * Reference hlavičky, které musí patřit TÉŽE organizaci jako faktura.
+     * Whitelist klíčů sám o sobě nestačí: povolený `contact_id` může nést
+     * cizí id. Ověřuje se proti organization_id ZAMČENÉ faktury, ne proti
+     * ambientnímu tenant contextu — ten může být nastavený jinak nebo
+     * vůbec (konzole, fronta).
+     *
+     * @var array<string, class-string<Model>>
+     */
+    private const array DRAFT_REFERENCES = [
+        'contact_id' => Contact::class,
+        'project_id' => Project::class,
+        'bank_account_id' => BankAccount::class,
+        'number_series_id' => InvoiceNumberSeries::class,
+    ];
+
     public function __construct(
         private readonly InvoiceNumberGenerator $numberGenerator,
         private readonly InvoiceTotalsCalculator $totalsCalculator,
         private readonly AuditLogger $auditLogger,
         private readonly InvoiceLogoSnapshotStore $logoSnapshots,
         private readonly CurrentOrganization $currentOrganization,
-    ) {
-    }
+    ) {}
 
     public function issue(IssuedInvoice $invoice, ?CarbonImmutable $issueDate = null): void
     {
@@ -282,6 +300,11 @@ final class IssuedInvoiceLifecycle
                 throw InvalidStateTransition::because('Upravovat lze pouze koncept faktury.');
             }
 
+            // Tenant kontrola referencí běží PŘED jakýmkoli zápisem —
+            // hlavičkou, položkami, přepočtem i auditem. Selhání tedy
+            // odvalí úplně všechno a faktura zůstane netknutá.
+            $this->assertReferencesBelongToInvoice($locked, $header);
+
             $locked->forceFill($header)->save();
 
             $locked->items()->withoutGlobalScope('organization')->delete();
@@ -377,6 +400,45 @@ final class IssuedInvoiceLifecycle
             $locked,
             IssuedInvoice::class,
         )($attributes);
+    }
+
+    /**
+     * Každá nenulová reference hlavičky musí existovat a patřit STEJNÉ
+     * organizaci jako zamčená faktura. Dotazy jdou bez globálního scope
+     * a porovnávají organization_id explicitně — ambientní tenant context
+     * není důkaz vlastnictví.
+     *
+     * @param  array<string, mixed>  $header
+     *
+     * @throws InvalidInvoiceReference
+     */
+    private function assertReferencesBelongToInvoice(IssuedInvoice $locked, array $header): void
+    {
+        $organizationId = (int) $locked->organization_id;
+
+        foreach (self::DRAFT_REFERENCES as $attribute => $model) {
+            if (! array_key_exists($attribute, $header)) {
+                continue;
+            }
+
+            $value = $header[$attribute];
+
+            // null = reference se odebírá; povinnost contact_id
+            // a number_series_id vynucuje až vystavení.
+            if ($value === null || $value === '') {
+                continue;
+            }
+
+            $belongs = $model::query()
+                ->withoutGlobalScope('organization')
+                ->whereKey($value)
+                ->where('organization_id', $organizationId)
+                ->exists();
+
+            if (! $belongs) {
+                throw InvalidInvoiceReference::forAttribute($attribute, $value);
+            }
+        }
     }
 
     /**

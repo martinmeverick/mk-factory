@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Invoicing\InvalidInvoiceReference;
 use App\Domain\Invoicing\InvalidStateTransition;
 use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\InvoiceNotIssuable;
@@ -127,7 +128,7 @@ class IssuedInvoiceController extends Controller
                 $this->headerData($request),
                 $this->itemRows($request->validated('items')),
             );
-        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+        } catch (InvalidStateTransition|InvoiceNotFound|InvalidInvoiceReference $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         } catch (MoneyOverflow $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
