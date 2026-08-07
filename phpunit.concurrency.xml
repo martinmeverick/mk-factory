@@ -13,6 +13,13 @@
     XML je ale konfigurace, ne bezpečnostní hranice: druhou (povinnou)
     kontrolu dělá Tests\Concurrency\ConcurrencyDatabaseGuard v PHP.
 
+    Hodnoty níž jsou ZÁROVEŇ zdrojem povoleného endpointu závory:
+    spojení `mysql` na 127.0.0.1:3306, databáze `mk_factory_test`.
+    Guard ověřuje celou tuhle identitu z VÝSLEDNÉ runtime konfigurace
+    (tedy i po aplikaci DB_URL) a rozhodne PŘED pokusem o spojení —
+    stejně pojmenované schéma na jiném serveru neprojde. Jiný endpoint
+    vyžaduje úplný opt-in, viz README.
+
     Spuštění: composer test:concurrency
 -->
 <phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
