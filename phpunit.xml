@@ -28,7 +28,14 @@
             `migrate:fresh`, což ZAHODÍ schéma. Bez force by proměnná
             prostředí shellu (typicky DB_URL) přesměrovala spojení na
             skutečnou databázi a `composer test` by ji smazal.
-            Runtime pojistku drží Tests\TestCase.
+
+            XML je ale konfigurace, ne bezpečnostní hranice — PHPUnit
+            u <env> zapisuje putenv a $_ENV, ale ne $_SERVER, a Laravel
+            čte $_SERVER dřív. Skutečnou závoru drží
+            Tests\Support\PrimaryTestDatabaseGuard, volaný z
+            Tests\TestCase::refreshApplication(), tedy PŘED
+            RefreshDatabase → migrate:fresh. Povolen je výhradně endpoint
+            sqlite / sqlite / :memory: bez aktivního DB_URL.
         -->
         <env name="DB_CONNECTION" value="sqlite" force="true"/>
         <env name="DB_DATABASE" value=":memory:" force="true"/>

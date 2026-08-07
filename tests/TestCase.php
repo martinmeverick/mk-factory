@@ -3,12 +3,47 @@
 namespace Tests;
 
 use Illuminate\Foundation\Testing\TestCase as BaseTestCase;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
-use RuntimeException;
+use Tests\Support\PrimaryTestDatabaseGuard;
 
 abstract class TestCase extends BaseTestCase
 {
+    /**
+     * Závora destruktivní sady.
+     *
+     * `refreshApplication()` volá Laravel v `setUpTheTestEnvironment()`
+     * PŘED `setUpTraits()`, a teprve `setUpTraits()` spouští
+     * `RefreshDatabase::refreshDatabase()` → `migrate:fresh`. Kontrola
+     * tedy běží:
+     *
+     *   - po bootstrapu aplikace a načtení konfigurace,
+     *   - po sestavení konfigurace spojení (včetně aplikace `DB_URL`),
+     *   - ale PŘED první destruktivní operací frameworku,
+     *
+     * a to bez ohledu na to, který traity test používá (`RefreshDatabase`,
+     * `DatabaseMigrations`, `DatabaseTruncation` i žádný).
+     *
+     * ## Proč NE `beforeRefreshingDatabase()`
+     *
+     * Ten hook by byl sémanticky přesnější, ale v ABSTRAKTNÍM PŘEDKOVI
+     * nefunguje: PHP dává metodě z traity přednost před zděděnou metodou
+     * předka. Jakmile potomek použije `use RefreshDatabase;`, vloží se do
+     * něj prázdná `beforeRefreshingDatabase()` z traity a ta implementaci
+     * z `Tests\TestCase` PŘEBIJE — závora by byla mrtvý kód. Ověřeno.
+     *
+     * Dřív se kontrola volala až v `setUp()` PO `parent::setUp()`, tedy až
+     * po `migrate:fresh`. Re-review to reprodukovalo: podstrčené `DB_URL`
+     * na dočasné MySQL schéma nechalo vzniknout 22 tabulek a teprve potom
+     * sada spadla. Guard tak nebyl bezpečnostní bariéra, jen pozdní
+     * diagnostika.
+     */
+    protected function refreshApplication(): void
+    {
+        parent::refreshApplication();
+
+        PrimaryTestDatabaseGuard::assertDisposable($this->app['db'], $this->app['config']);
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -17,38 +52,9 @@ abstract class TestCase extends BaseTestCase
         // Test, který HTTP potřebuje, si musí explicitně nastavit Http::fake().
         Http::preventStrayRequests();
 
-        $this->assertRunningOnDisposableDatabase();
-    }
-
-    /**
-     * Hlavní sada běží přes RefreshDatabase, tedy spouští `migrate:fresh`
-     * — destruktivní operaci. Musí proto jet výhradně nad SQLite in-memory
-     * databází, která zanikne s procesem.
-     *
-     * Samotné phpunit.xml jako hranice nestačí: bez force="true" proměnná
-     * prostředí shellu hodnotu z XML přebije a `DB_URL=mysql://…/mk_factory`
-     * by z obyčejného `composer test` udělal nástroj na smazání vývojové
-     * databáze. XML tu díru zavírá, tahle kontrola ji hlídá i tehdy, když
-     * konfigurace přijde odjinud (např. bootstrap/cache/config.php).
-     */
-    private function assertRunningOnDisposableDatabase(): void
-    {
-        $connection = DB::connection();
-        $driver = $connection->getDriverName();
-        $database = (string) $connection->getDatabaseName();
-
-        if ($driver === 'sqlite' && ($database === ':memory:' || $database === '')) {
-            return;
-        }
-
-        throw new RuntimeException(sprintf(
-            'Hlavní testovací sada smí běžet jen nad SQLite in-memory databází, '
-            .'protože přes RefreshDatabase spouští migrate:fresh. Aktivní spojení je '
-            .'driver "%s", databáze "%s" — sada se zastavila, aby ji nesmazala. '
-            .'Zkontrolujte proměnné prostředí DB_CONNECTION, DB_DATABASE a DB_URL. '
-            .'Testy souběhu nad MariaDB se spouští odděleně: composer test:concurrency.',
-            $driver,
-            $database,
-        ));
+        // Druhá kontrola po celém setUpu — zachytí i konfiguraci
+        // přepsanou v průběhu (traita, service provider, samotný test).
+        // Bariérou je ale ta v refreshApplication() výše.
+        PrimaryTestDatabaseGuard::assertDisposable($this->app['db'], $this->app['config']);
     }
 }
