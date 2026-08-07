@@ -12,6 +12,7 @@ use App\Models\ReceivedInvoiceAttachment;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
 
@@ -234,6 +235,131 @@ final class ReceivedInvoiceLifecycle
         }
 
         return $attachment;
+    }
+
+    /**
+     * Smazání JEDNÉ přílohy. Musí jet stejným vzorem jako ostatní mutace
+     * přijaté faktury, protože finalita dokladu je vlastnost RODIČE:
+     * transakce → tenant-scoped zamčení RODIČE (lockForUpdate) → kontrola
+     * aktuálního stavu nad zamčeným řádkem → znovunačtení přílohy pod
+     * zamčeným rodičem → DB delete → audit → commit → teprve pak soubor.
+     *
+     * Dřív mazal přílohu přímo controller (`$attachment->delete()`). Guard
+     * na modelu sice četl stav z DATABÁZE, ale bez zámku: mezi jeho čtením
+     * a samotným DELETE se vešel cizí `markPaid()`, takže příloha zmizela
+     * až PO finalizaci dokladu (reprodukováno nad MariaDB:
+     * `phase=checked result=deleted final_status=paid attachment_count=0`).
+     * Zámek rodiče tenhle okamžik uzavírá — druhá operace čeká a rozhoduje
+     * se podle skutečného stavu.
+     *
+     * Pořadí zámků je shodné s `delete()` a `attach()` (nejdřív rodič, pak
+     * potomek), aby nevznikl nový deadlock pattern.
+     *
+     * @return bool zda se po commitu podařilo odstranit i soubor na disku;
+     *              `false` znamená osiřelý soubor bez odkazu z DB (viz níže)
+     *
+     * @throws InvalidStateTransition|InvoiceNotFound|AttachmentNotFound
+     */
+    public function deleteAttachment(ReceivedInvoiceAttachment $attachment): bool
+    {
+        $attachmentKey = $attachment->getKey();
+
+        if (! $attachment->exists || $attachmentKey === null) {
+            throw new InvalidArgumentException('Přílohu je nutné nejdřív uložit.');
+        }
+
+        // Rodič i tenant se berou z ULOŽENÝCH hodnot, ne z instance —
+        // podvržené received_invoice_id/organization_id v paměti by jinak
+        // guard přesměrovalo na jiný, nefinální doklad.
+        $invoiceId = $attachment->getOriginal('received_invoice_id');
+        $organizationId = $attachment->getOriginal('organization_id');
+
+        if ($invoiceId === null || $organizationId === null) {
+            throw AttachmentNotFound::forKey($attachmentKey);
+        }
+
+        /** @var ReceivedInvoice|null $invoice */
+        $invoice = ReceivedInvoice::query()
+            ->withoutGlobalScope('organization')
+            ->where('organization_id', $organizationId)
+            ->whereKey($invoiceId)
+            ->first();
+
+        if ($invoice === null) {
+            throw InvoiceNotFound::forKey($invoiceId);
+        }
+
+        $storedPath = null;
+
+        // mutate() ověří tenant context proti organizaci faktury a zamkne
+        // řádek rodiče — cizí organizace tedy skončí na InvoiceNotFound.
+        $this->mutate($invoice, function (ReceivedInvoice $locked) use ($attachmentKey, &$storedPath): void {
+            $this->assertNotFinal($locked, 'Přílohu uhrazené ani zamítnuté faktury nelze smazat.');
+
+            /** @var ReceivedInvoiceAttachment|null $fresh */
+            $fresh = ReceivedInvoiceAttachment::query()
+                ->withoutGlobalScope('organization')
+                ->where('organization_id', $locked->organization_id)
+                ->where('received_invoice_id', $locked->getKey())
+                ->whereKey($attachmentKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($fresh === null) {
+                throw AttachmentNotFound::forKey($attachmentKey);
+            }
+
+            $storedPath = (string) $fresh->stored_path;
+
+            $fresh->delete();
+
+            $this->auditLogger->log('invoice.attachment_removed', $locked, [
+                'original_filename' => $fresh->original_filename,
+                'size_bytes' => $fresh->size_bytes,
+            ]);
+        });
+
+        return $this->removeStoredFile($storedPath);
+    }
+
+    /**
+     * Odstranění souboru přílohy AŽ PO commitu.
+     *
+     * Bezpečný směr je jen jeden: nejdřív zmizí DB reference, pak soubor.
+     * Pád mezi commitem a úklidem nechá osiřelý soubor bez odkazu z DB —
+     * to je přijatelné a uklidí to provozní kompenzace (viz
+     * docs/INVOICE_LIFECYCLE.md). Opačné pořadí by při rollbacku nechalo
+     * živý záznam ukazovat na neexistující soubor, což je nepřijatelné.
+     *
+     * Selhání se proto NEVRACÍ do DB — jen se řízeně ohlásí volajícímu
+     * a zaloguje.
+     */
+    private function removeStoredFile(?string $path): bool
+    {
+        if ($path === null || $path === '') {
+            return true;
+        }
+
+        try {
+            $deleted = Storage::disk(self::ATTACHMENT_DISK)->delete($path);
+        } catch (\Throwable $e) {
+            Log::warning('Soubor smazané přílohy se nepodařilo odstranit.', [
+                'disk' => self::ATTACHMENT_DISK,
+                'path' => $path,
+                'exception' => $e::class.': '.$e->getMessage(),
+            ]);
+
+            return false;
+        }
+
+        if (! $deleted) {
+            Log::warning('Soubor smazané přílohy zůstal na disku jako osiřelý.', [
+                'disk' => self::ATTACHMENT_DISK,
+                'path' => $path,
+            ]);
+        }
+
+        return $deleted;
     }
 
     /**

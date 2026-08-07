@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Invoicing\AttachmentNotFound;
 use App\Domain\Invoicing\AttachmentStorageFailed;
 use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Domain\Invoicing\InvalidStateTransition;
@@ -54,21 +55,23 @@ class AttachmentController extends Controller
         return Storage::disk('local')->download($attachment->stored_path, $attachment->original_filename);
     }
 
+    /**
+     * O tom, zda příloha smí zmizet, rozhoduje ZAMČENÝ řádek rodičovské
+     * faktury v lifecycle vrstvě. Controller stav dřív načtené instance
+     * neposuzuje a soubor nemaže sám — jen zavolá doménovou operaci
+     * a případnou doménovou chybu přeloží na kontrolovaný redirect.
+     */
     public function destroy(ReceivedInvoiceAttachment $attachment): RedirectResponse
     {
-        $received = $attachment->receivedInvoice;
+        // Jen cíl redirectu; žádné rozhodnutí se z toho neodvozuje.
+        $invoiceId = $attachment->received_invoice_id;
 
-        // Nejdřív záznam (guard přílohy uhrazené faktury smazání odmítne),
-        // až pak soubor — opačné pořadí by po odmítnutí nechalo záznam
-        // bez souboru.
         try {
-            $attachment->delete();
-        } catch (ImmutableInvoiceViolation $e) {
-            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
+            $this->lifecycle->deleteAttachment($attachment);
+        } catch (InvalidStateTransition|InvoiceNotFound|AttachmentNotFound|ImmutableInvoiceViolation $e) {
+            return redirect()->route('received.show', $invoiceId)->with('error', $e->getMessage());
         }
 
-        Storage::disk('local')->delete($attachment->stored_path);
-
-        return redirect()->route('received.show', $received)->with('status', 'Příloha byla smazána.');
+        return redirect()->route('received.show', $invoiceId)->with('status', 'Příloha byla smazána.');
     }
 }
