@@ -252,13 +252,19 @@ nerozhoduje podle dřív načtené instance:
 - `delete(invoice)` — uhrazenou fakturu nesmaže (kontrola nad zamčeným
   řádkem); přílohy maže v téže transakci, jejich soubory až PO commitu
   (rollback nesmí nechat záznamy bez souborů). Audit `invoice.deleted`.
+- `deleteAttachment(attachment)` — smazání JEDNÉ přílohy. Finalita je
+  vlastnost RODIČE, takže operace zamyká rodičovskou fakturu, ne přílohu:
+  transakce → tenant-scoped zamčení rodiče → kontrola aktuálního stavu →
+  znovunačtení přílohy pod zamčeným rodičem → DB delete → audit
+  `invoice.attachment_removed` → commit → teprve pak soubor.
 
 ### Finální stavy — jediný zdroj pravdy
 
 `ReceivedInvoice::FINAL_STATUSES` = **paid, rejected**. Tenhle seznam
 (a predikáty `isFinal()` / `isFinalStatus()`) používá VŠECHNO, co o finalitě
 rozhoduje: `updating` i `deleting` guard modelu, `updateDetails()`,
-`delete()` a `attach()` v lifecycle, guardy příloh, controller i šablona.
+`delete()`, `attach()` i `deleteAttachment()` v lifecycle, guardy příloh,
+controller i šablona.
 Dřív se na několika místech testoval jen `=== Paid` samostatně, takže
 zamítnutou fakturu šlo smazat a její přílohy měnit i mazat. Ručně opsané
 seznamy stavů se proto v této doméně nepoužívají — rozejdou se.
@@ -287,10 +293,44 @@ jinak nechalo záznam bez souboru. Zbývající failure window: pád procesu
 mezi commitem a smazáním souboru nechá osiřelý soubor bez odkazu z DB,
 což je bezpečný směr (stejně jako u snapshotu loga).
 
+#### Mazání jedné přílohy pod zámkem rodiče
+
+Individuální mazání dřív dělal přímo controller (`$attachment->delete()`)
+a o finalitě rozhodoval `deleting` guard modelu. Ten sice četl stav
+z DATABÁZE, ale **bez zámku rodiče**, takže mezi jeho čtením a samotným
+DELETE se vešel cizí `markPaid()`. Deterministická reprodukce nad MariaDB
+skončila `phase=checked result=deleted final_status=paid attachment_count=0`
+— sekvenční stale guard fungoval, skutečný souběh ne.
+
+Operace proto sedí v `ReceivedInvoiceLifecycle::deleteAttachment()` a jede
+stejným vzorem jako ostatní mutace přijaté faktury. **Pořadí zámků je
+shodné s `delete()` i `attach()`: nejdřív rodič, pak potomek** — žádný nový
+deadlock pattern nevzniká. Rodič i tenant se určují z ULOŽENÝCH hodnot
+přílohy (`getOriginal()`), takže podvržené `received_invoice_id` ani
+`organization_id` v paměti guard nepřesměruje.
+
+Controller (`AttachmentController::destroy()`) o finalitě nerozhoduje
+vůbec: zavolá lifecycle operaci a doménovou chybu přeloží na redirect
+s flash zprávou.
+
+Filesystem se řeší až PO commitu a jeho selhání se **nevrací do DB** —
+`deleteAttachment()` vrací `false` a zapíše `Log::warning`. Provozní
+kompenzací je úklid osiřelých souborů (soubor bez odkazu z DB); opačný
+směr, tedy živý záznam ukazující na neexistující soubor, přijatelný není.
+
 Souběžné protichůdné operace se serializují zámkem řádku a druhá je
 odmítnuta podle aktuálního stavu; dvojitý `markPaid` nevytvoří druhou
 platbu, `markPaid` vs. update/delete končí konzistentně (ověřeno MariaDB
-sadou `ReceivedInvoiceConcurrencyTest`).
+sadou `ReceivedInvoiceConcurrencyTest`). Obě serializované varianty
+mazání přílohy ověřuje `ReceivedInvoiceAttachmentConcurrencyTest`:
+
+| Kdo získá zámek rodiče první | Výsledek |
+|---|---|
+| `markPaid` | faktura je `paid`, mazání přílohy odmítnuto (`InvalidStateTransition`), příloha i soubor zůstávají |
+| `deleteAttachment` | příloha i soubor zmizí, následný `markPaid` pracuje nad konzistentním stavem |
+
+Zakázaný výsledek je jediný: `paid` faktura bez přílohy, která byla
+odstraněna až PO jejím finalizačním zámku.
 
 ## QR platba podle stavu (PDF)
 

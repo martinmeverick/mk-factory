@@ -29,6 +29,12 @@ tohoto rozhodnutí.
 > opravy selže. Přehled je v části 7. Nálezy z části 6 (známé slabiny)
 > opravené NEJSOU — jsou to vědomá omezení, ne regrese.
 
+> **Stav lifecycle hardeningu:** poslední closure review skončilo
+> `LIFECYCLE HARDENING: NOT CLOSED` kvůli třem HIGH nálezům (souběžné
+> mazání přílohy, načasování závory hlavní testovací DB, identita
+> endpointu souběžné DB). Všechny tři jsou opravené — viz kolo 5
+> v části 7. Zbývá je nezávisle ověřit.
+
 ### Vědomě mimo rozsah
 Bankovní API a párování plateb, OCR, datová schránka, odesílání e-mailem,
 upomínky, opakované faktury, dobropisy, zálohové faktury, sklad, účetní
@@ -320,6 +326,28 @@ a runtime kontrolou v `Tests\TestCase`.
 > dřív — exportovaná proměnná se tedy k aplikaci dostane i s `force`.
 > Skutečnou brzdou jsou až kontroly v PHP. Ověřeno empiricky.
 
+### Kolo 5 — closure review (3 HIGH nálezy, všechny uzavřené)
+
+Closure review potvrdilo předchozí opravy, ale skončilo verdiktem
+`LIFECYCLE HARDENING: NOT CLOSED` kvůli třem novým HIGH nálezům. Všechny
+mají regresní test ověřený dočasným vrácením opravy:
+
+| # | Nález | Oprava | Regresní test |
+|---|---|---|---|
+| 1 | Souběžné mazání přílohy obešlo finalitu přijaté faktury — guard četl stav rodiče bez zámku, mezi čtením a DELETE se vešel cizí `markPaid()` | operace přesunuta do `ReceivedInvoiceLifecycle::deleteAttachment()`: transakce → zámek RODIČE → kontrola stavu → znovunačtení přílohy → DB delete → audit → commit → teprve pak soubor | `ReceivedInvoiceAttachmentDeletionTest`, `ReceivedInvoiceAttachmentConcurrencyTest` (MariaDB) |
+| 2 | Runtime závora hlavní testovací DB běžela až po `parent::setUp()`, tedy až po `RefreshDatabase` → `migrate:fresh` (reprodukováno: 22 tabulek v podstrčeném schématu) | `Tests\Support\PrimaryTestDatabaseGuard` volaný z `Tests\TestCase::refreshApplication()`, tedy před `setUpTraits()`; kontroluje výslednou runtime konfiguraci (spojení, driver, `:memory:`, aktivní `DB_URL`, read/write split) | `PrimaryTestDatabaseGuardTest`, `PrimaryDatabaseGuardMysqlProbeTest` (MariaDB) |
+| 3 | Závora souběžné DB neověřovala host, port ani jméno spojení — `DB_PORT=1` přepsalo XML i s `force="true"` a Laravel se skutečně pokusil připojit jinam | guard ověřuje celou identitu endpointu z výsledné runtime konfigurace (spojení, driver, host, port, databáze, socket, split) a rozhoduje PŘED spojením; jiný endpoint jen s úplným opt-inem | `ConcurrencyDatabaseGuardEndpointTest`, `ConcurrencyDatabaseGuardNameRulesTest`, `ConcurrencyDatabaseGuardTest` (MariaDB) |
+
+Doklady bez opravy: nález 1 skončil `paid` fakturou bez přílohy odstraněné
+až po jejím finalizačním zámku (a cross-tenant mazání přílohy prošlo);
+nález 2 vyrobil v podstrčeném MySQL schématu 22 tabulek a v podstrčené
+persistentní SQLite spustil `migrate:fresh`; nález 3 nechal Laravel
+skutečně navázat spojení na neschválený host/port (30 s timeout,
+resp. odmítnutí na portu 1) místo řízeného odmítnutí.
+
+Podrobnosti k testovací infrastruktuře (přesná identita obou povolených
+databází a jak funguje opt-in) jsou v README, sekce Testy.
+
 **Kde hledat dál:** oblasti kolem oprav (nové cesty, které vzor obcházejí),
 a místa, kde testy ověřují doménu, ale ne skutečný HTTP průchod.
 
@@ -356,7 +384,7 @@ a upozornění na **chybějící test kritického chování**.
 | Umístění | `/Applications/XAMPP/xamppfiles/htdocs/mk-factory` |
 | Repozitář | `github.com/martinmeverick/mk-factory` (privátní) |
 | Větev | `feature/invoicing-mvp-foundation` (do `main` nic nemergováno) |
-| Stav | HEAD větve po opravách z re-review (kolo 4, viz část 7) |
-| Testy (SQLite) | `composer test` — 361 testů / 932 asercí |
-| Testy souběhu (MariaDB) | `composer test:concurrency` — 28 testů / ~78 asercí, deterministická jednorázová bariéra |
+| Stav | HEAD větve po opravách z closure review (kolo 5, viz část 7) |
+| Testy (SQLite) | `composer test` — 397 testů / 1007 asercí |
+| Testy souběhu (MariaDB) | `composer test:concurrency` — 37 testů / 117 asercí, deterministická jednorázová bariéra |
 | Migrace | 19 (z toho 3 skeletonové Laravelu) |
