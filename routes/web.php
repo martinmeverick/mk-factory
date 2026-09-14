@@ -17,7 +17,12 @@ use Illuminate\Support\Facades\Route;
 
 Route::middleware('guest')->group(function () {
     Route::get('/login', [AuthController::class, 'show'])->name('login');
-    Route::post('/login', [AuthController::class, 'login'])->name('login.attempt');
+
+    // Pojmenovaný limiter „login“ (AppServiceProvider): 5/min na e-mail+IP,
+    // 30/min na IP. Jen POST — stránka s formulářem limit nemá.
+    Route::post('/login', [AuthController::class, 'login'])
+        ->middleware('throttle:login')
+        ->name('login.attempt');
 });
 
 Route::middleware('auth')->group(function () {

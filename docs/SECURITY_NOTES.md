@@ -5,6 +5,17 @@
 - Session-based přihlášení (Laravel Auth), bcrypt hesla, regenerace session
   po přihlášení, CSRF ochrana na všech formulářích (Blade `@csrf`).
 - Registrace neexistuje — uživatele zakládá správce (seeder / tinker).
+- Limit pokusů o přihlášení (`throttle:login`, definice v
+  `AppServiceProvider`, regrese `tests/Feature/Security/LoginRateLimitTest.php`):
+  - 5 POST pokusů/min na dvojici (normalizovaný e-mail, IP),
+  - 30 POST pokusů/min na IP napříč e-maily.
+  Počítá se každý POST, úspěšný i neúspěšný; GET stránka limit nemá.
+  Po překročení HTTP 429 s `Retry-After` a obecnou českou hláškou — bez
+  echa údajů, bez informace, zda účet existuje. Klíče jsou hashované
+  a vždy obsahují IP: nikdo nemůže zamknout účet ostatním z jiné IP.
+  IP je `REMOTE_ADDR` (žádná proxy není důvěryhodná, `X-Forwarded-For`
+  se ignoruje). Stav limiteru žije ve výchozí cache, která v produkci
+  musí být sdílená a trvalá (viz `docs/VPS_READINESS.md`).
 - Aktivní organizace: `current_organization_id` v session. Middleware
   `SetCurrentOrganization` při KAŽDÉM požadavku ověřuje členství uživatele
   v organizaci; nečlenství → session klíč smazán, redirect na výběr.
@@ -72,10 +83,16 @@
   dnes nelze podstrčit `organization_id` ani `status`, ale jakýkoli budoucí
   `Model::create($request->all())` by to umožnil — při rozšiřování doplňte
   explicitní `$fillable`.
-- Chybí rate limiting na login (Laravel throttle middleware — doplnit před
-  veřejným nasazením).
+- Limit přihlášení je vázaný na IP. Distribuovaný útok z mnoha zdrojů
+  (každý pod 5 pokusů/min na účet) jeden limit na IP nezachytí; na to by
+  bylo potřeba zpomalení per účet (s rizikem zamykání cizích účtů),
+  2FA nebo detekce na úrovni sítě. Limit je také jen tak trvalý jako
+  produkční cache — s cache `array` by neplatil.
 - Žádné 2FA, žádný audit přihlášení.
 - `.env` v repozitáři není; `.env.example` obsahuje jen lokální dev výchozí
   hodnoty (root bez hesla — pouze lokální XAMPP).
-- Aplikace se předpokládá za HTTPS reverse proxy v produkci (secure cookie
-  nastavit při nasazení).
+- Produkce běží jako nginx → PHP-FPM na jednom stroji, bez další reverse
+  proxy; secure/HttpOnly/SameSite cookie a další produkční parametry
+  jsou v `docs/VPS_READINESS.md`. Pokud by se před aplikaci přidala proxy,
+  je nutné explicitně nastavit `trustProxies` v `bootstrap/app.php`,
+  jinak limit přihlášení uvidí IP proxy.

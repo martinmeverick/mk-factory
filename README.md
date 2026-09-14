@@ -6,11 +6,14 @@ PDF s QR Platbou (SPD 1.0) a dashboard. Podrobnosti v `docs/`.
 
 ## Požadavky
 
-- PHP ≥ 8.3 (vyvíjeno na 8.5) s rozšířeními: pdo_mysql, pdo_sqlite, mbstring,
-  bcmath, gd, intl, fileinfo, zip
+- PHP ≥ 8.4.1 (vyžadují zamčené závislosti v `composer.lock`; vyvíjeno
+  na 8.5) s rozšířeními: bcmath, gd, pdo_mysql, mbstring, intl, fileinfo, zip
+  - `pdo_mysql` je pro produkční MariaDB/MySQL; `pdo_sqlite` je potřeba jen
+    pro izolovanou lokální testovací sadu (`composer test`)
 - Composer 2
 - MySQL 8 / MariaDB ≥ 10.4 (lokálně XAMPP)
 - Node.js NENÍ potřeba (žádný JS build — statické CSS v `public/css/app.css`)
+- Produkční nasazení na vlastní VPS: kontrakt v `docs/VPS_READINESS.md`
 
 ## Instalace (macOS, XAMPP)
 
@@ -239,4 +242,5 @@ registru lze vše zadat ručně. Vypnout jde přes `ARES_ENABLED=false`.
 | docs/ARES_INTEGRATION.md | načítání firem z ARESu, zakládání kontaktů |
 | docs/INTEGRATION_CONTRACT.md | návrh budoucího REST API, napojení U Jabka |
 | docs/SECURITY_NOTES.md | bezpečnostní model a známá omezení |
+| docs/VPS_READINESS.md | kontrakt produkčního nasazení na vlastní VPS (runtime, cookies, cache, webroot, migrace dat) |
 | docs/FUTURE_BACKLOG.md | odložené funkce |

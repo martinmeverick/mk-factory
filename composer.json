@@ -11,7 +11,10 @@
     ],
     "license": "proprietary",
     "require": {
-        "php": "^8.3",
+        "php": "^8.4.1",
+        "ext-bcmath": "*",
+        "ext-gd": "*",
+        "ext-pdo_mysql": "*",
         "barryvdh/laravel-dompdf": "^3.1",
         "endroid/qr-code": "^6.1",
         "laravel/framework": "^13.8",
