@@ -11,6 +11,8 @@ use App\Enums\IssuedInvoiceStatus;
 use App\Enums\VatRegime;
 use App\Models\IssuedInvoice;
 use App\Models\IssuedInvoiceItem;
+use App\Models\Organization;
+use Carbon\CarbonImmutable;
 use DateTimeImmutable;
 use Illuminate\Support\Facades\Storage;
 
@@ -20,6 +22,11 @@ use Illuminate\Support\Facades\Storage;
  */
 final class InvoicePdfDataFactory
 {
+    public function __construct(
+        private readonly InvoiceLogoSnapshotStore $logoSnapshots,
+    ) {
+    }
+
     public function fromInvoice(IssuedInvoice $invoice): InvoicePdfData
     {
         $invoice->loadMissing(['items', 'contact', 'bankAccount', 'organization.settings']);
@@ -101,10 +108,23 @@ final class InvoicePdfDataFactory
             vatPayer: $vatPayer,
             note: $invoice->note,
             footerText: $footerText,
-            logoDataUri: $this->logoDataUri($organization->logo_path),
-            qrDataUri: $this->qrDataUri($invoice, $bankAccount, $isDraft),
+            logoDataUri: $this->logoDataUri($invoice, $organization, $isDraft),
+            qrDataUri: $this->qrDataUri($invoice, $bankAccount),
+            status: $invoice->status->value,
+            paidAmount: Money::fromMinor((int) $invoice->paid_amount_minor, $invoice->currency),
+            remainingAmount: $this->remainingAmount($invoice),
             vatRegime: $vatRegime,
         );
+    }
+
+    /**
+     * Zbývající částka nikdy není záporná (přeplatek se nevrací jako mínus).
+     */
+    private function remainingAmount(IssuedInvoice $invoice): Money
+    {
+        $remaining = (int) $invoice->total_minor - (int) $invoice->paid_amount_minor;
+
+        return Money::fromMinor(max(0, $remaining), $invoice->currency);
     }
 
     /**
@@ -144,34 +164,63 @@ final class InvoicePdfDataFactory
             ->all();
     }
 
-    private function logoDataUri(?string $logoPath): ?string
+    /**
+     * Koncept použije aktuální logo organizace, vystavená faktura svůj
+     * snapshot — pozdější změna či smazání firemního loga nesmí změnit
+     * historický doklad. Snapshot musí patřit téže organizaci.
+     */
+    private function logoDataUri(IssuedInvoice $invoice, Organization $organization, bool $isDraft): ?string
     {
-        if ($logoPath === null || ! Storage::disk('local')->exists($logoPath)) {
+        $path = $isDraft ? $organization->logo_path : $invoice->logo_snapshot_path;
+
+        if ($path === null) {
             return null;
         }
 
-        $contents = Storage::disk('local')->get($logoPath);
-        $mime = Storage::disk('local')->mimeType($logoPath) ?: 'image/png';
+        if (! $isDraft && ! $this->logoSnapshots->belongsToOrganization($path, (int) $invoice->organization_id)) {
+            return null;
+        }
+
+        if (! Storage::disk('local')->exists($path)) {
+            return null;
+        }
+
+        $contents = Storage::disk('local')->get($path);
+        $mime = Storage::disk('local')->mimeType($path) ?: 'image/png';
 
         return 'data:'.$mime.';base64,'.base64_encode($contents);
     }
 
     /**
-     * QR Platba jen pro vystavené faktury s bankovním účtem a kladnou částkou.
+     * QR Platba podle stavu dokladu (viz INVOICE_LIFECYCLE.md):
+     * draft / paid / cancelled → žádné QR;
+     * issued, overdue, partially_paid → QR na ZBÝVAJÍCÍ částku.
      */
-    private function qrDataUri(IssuedInvoice $invoice, ?array $bankAccount, bool $isDraft): ?string
+    private function qrDataUri(IssuedInvoice $invoice, ?array $bankAccount): ?string
     {
-        if ($isDraft || $bankAccount === null || empty($bankAccount['iban']) || (int) $invoice->total_minor <= 0) {
+        $payable = [IssuedInvoiceStatus::Issued, IssuedInvoiceStatus::PartiallyPaid];
+
+        if (! in_array($invoice->status, $payable, true)) {
+            return null;
+        }
+
+        if ($bankAccount === null || empty($bankAccount['iban'])) {
+            return null;
+        }
+
+        $remaining = $this->remainingAmount($invoice);
+
+        if (! $remaining->isPositive()) {
             return null;
         }
 
         try {
             $payload = SpdPayload::create(
                 iban: $bankAccount['iban'],
-                amount: Money::fromMinor((int) $invoice->total_minor, $invoice->currency),
+                amount: $remaining,
                 variableSymbol: $invoice->variable_symbol,
                 message: $invoice->invoice_number ? "Faktura {$invoice->invoice_number}" : null,
-                dueDate: \Carbon\CarbonImmutable::parse($invoice->due_date),
+                dueDate: CarbonImmutable::parse($invoice->due_date),
             );
 
             return QrPaymentImage::pngDataUri($payload);

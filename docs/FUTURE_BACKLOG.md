@@ -2,10 +2,17 @@
 
 Seřazeno zhruba dle očekávané priority pro U Jabka a další projekty.
 
+## Hotovo po sepsání backlogu
+
+- **Načítání firem z ARESu** podle IČO vč. zakládání dodavatele bez
+  předchozího kontaktu (docs/ARES_INTEGRATION.md).
+- **external_id na kontaktech** + párování odběratelů pro napojené systémy.
+
 ## Vysoká priorita (další iterace)
 
 1. **Veřejné REST API v1** dle INTEGRATION_CONTRACT.md (Sanctum tokeny,
-   idempotence, external_id pro kontakty a faktury).
+   idempotence, external_id na fakturách). První konzument: automatické
+   fakturování objednávek z U Jabka — převážně B2C bez IČO.
 2. **Role a oprávnění** — rozlišit owner/member (mazání, nastavení, členové).
 3. **Odesílání faktur e-mailem** (PDF příloha, šablona, log odeslání).
 4. **Rate limiting + audit přihlášení** (throttle, poslední přihlášení).

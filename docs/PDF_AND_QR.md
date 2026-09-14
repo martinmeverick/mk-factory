@@ -116,6 +116,20 @@ nastavuje `defaultFont => 'DejaVu Sans'`. Žádné doinstalace fontů, žádné
   v šabloně) ani spouštět inline PHP.
 - Logo se čte z privátního disku (`storage/app/private`) a do data URI ho
   převádí mapper — šablona s filesystémem nepracuje.
+- Vystavená faktura čte **snapshot loga** (`logo_snapshot_path`), nikdy
+  aktuální logo organizace. Snapshot vzniká při vystavení ověřeným zápisem
+  (`InvoiceLogoSnapshotStore::capture()` — chyba zápisu = `LogoSnapshotFailed`
+  a vystavení se zastaví) a po rollbacku transakce se kompenzačně maže.
+- **Nenakonfigurované logo ≠ chybějící logo.** `logo_path = NULL` je
+  legitimní a faktura se vystaví bez loga; vyplněná cesta na chybějící,
+  nečitelný nebo nepovolený soubor vystavení ZASTAVÍ (číslo se nespotřebuje).
+  Zdrojová cesta musí být relativní, bez `..` a uvnitř `logos/org-{id}/`
+  vlastní organizace; kontrola je řetězcová a běží před dotykem disku,
+  protože Flysystem `..` normalizuje místo odmítnutí.
+  Filesystem a DB nemají společnou transakci — přesný protokol, záruky
+  a přiznané failure window popisuje `INVOICE_LIFECYCLE.md` (sekce Logo
+  historického dokladu). Snapshot se vykreslí jen pro organizaci, jejíž id
+  nese v cestě (`belongsToOrganization`).
 
 ## 6. Známá omezení dompdf
 

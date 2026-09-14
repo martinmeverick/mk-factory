@@ -42,8 +42,17 @@ Pořadí migrací: `organizations` → `organization_members` → `contacts` →
 ## contacts
 `organization_id`, `type` string ('customer'|'supplier'|'both', enum
 `ContactType`), `name`, `ico` null, `dic` null, `street/city/zip` null,
-`country` default 'CZ', `email` null, `phone` null, `note` text null.
-Index (organization_id, type).
+`country` default 'CZ', `email` null, `phone` null, `note` text null,
+`external_id` string null (klíč integrací — U Jabka, MEX, Cashflow).
+
+Indexy: (organization_id, type), (organization_id, email),
+**unique(organization_id, ico)**, **unique(organization_id, external_id)**.
+
+Unikátní IČO nese find-or-create dodavatele (`SupplierResolver`). NULL se
+v unikátním indexu opakovat smí — to je zásadní pro B2C, kde odběratelem
+bývá fyzická osoba **bez IČO**. Prázdné řetězce se normalizují na NULL,
+jinak by kolidovaly. IČO se ukládá doplněné nulami na 8 číslic.
+Párování odběratelů z napojených systémů viz INTEGRATION_CONTRACT.md.
 
 ## bank_accounts
 `organization_id`, `name`, `account_number` string(30) (český formát, může

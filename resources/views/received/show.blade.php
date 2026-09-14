@@ -13,7 +13,7 @@
             </div>
         </div>
         <div class="header-actions">
-            @if (in_array($invoice->status->value, ['received', 'approved'], true))
+            @if (! $invoice->isFinal())
                 <a href="{{ route('received.edit', $invoice) }}" class="btn">Upravit</a>
             @endif
             @if ($invoice->status->value === 'received')
@@ -22,7 +22,7 @@
                     <button type="submit" class="btn btn-primary">Schválit</button>
                 </form>
             @endif
-            @if (in_array($invoice->status->value, ['received', 'approved'], true))
+            @if (! $invoice->isFinal())
                 <form method="post" action="{{ route('received.mark-paid', $invoice) }}"
                       onsubmit="return confirm('Označit fakturu jako uhrazenou?')">
                     @csrf
@@ -83,28 +83,33 @@
                         <li>
                             <a href="{{ route('attachments.download', $attachment) }}">{{ $attachment->original_filename }}</a>
                             <span class="muted">({{ number_format($attachment->size_bytes / 1024, 0, ',', ' ') }} kB)</span>
-                            <form method="post" action="{{ route('attachments.destroy', $attachment) }}"
-                                  onsubmit="return confirm('Smazat přílohu?')">
-                                @csrf
-                                @method('DELETE')
-                                <button type="submit" class="link-button danger">Smazat</button>
-                            </form>
+                            {{-- Přílohy finálního dokladu jsou zmrazené (viz INVOICE_LIFECYCLE.md). --}}
+                            @if (! $invoice->isFinal())
+                                <form method="post" action="{{ route('attachments.destroy', $attachment) }}"
+                                      onsubmit="return confirm('Smazat přílohu?')">
+                                    @csrf
+                                    @method('DELETE')
+                                    <button type="submit" class="link-button danger">Smazat</button>
+                                </form>
+                            @endif
                         </li>
                     @endforeach
                 </ul>
             @endif
 
-            <h3>Nahrát přílohu</h3>
-            <form method="post" action="{{ route('attachments.store', $invoice) }}"
-                  enctype="multipart/form-data" class="inline-form">
-                @csrf
-                <div class="field">
-                    <label class="sr-only" for="attachment">Příloha</label>
-                    <input type="file" id="attachment" name="attachment" accept=".pdf,.jpg,.jpeg,.png" required>
-                    @error('attachment')<p class="field-error">{{ $message }}</p>@enderror
-                </div>
-                <button type="submit" class="btn">Nahrát</button>
-            </form>
+            @if (! $invoice->isFinal())
+                <h3>Nahrát přílohu</h3>
+                <form method="post" action="{{ route('attachments.store', $invoice) }}"
+                      enctype="multipart/form-data" class="inline-form">
+                    @csrf
+                    <div class="field">
+                        <label class="sr-only" for="attachment">Příloha</label>
+                        <input type="file" id="attachment" name="attachment" accept=".pdf,.jpg,.jpeg,.png" required>
+                        @error('attachment')<p class="field-error">{{ $message }}</p>@enderror
+                    </div>
+                    <button type="submit" class="btn">Nahrát</button>
+                </form>
+            @endif
         </section>
     </div>
 @endsection

@@ -50,7 +50,56 @@ class IssuedInvoice extends Model
         'footer_text',
         // Tiskne se na fakturu, proto je po vystavení součástí dokladu.
         'note',
+        // Logo zmrazené k okamžiku vystavení (historický doklad se nesmí měnit).
+        'logo_snapshot_path',
     ];
+
+    /**
+     * Lifecycle pole: stav, číslo, úhrady a časy přechodů. Zapisuje je
+     * VÝHRADNĚ App\Domain\Invoicing\IssuedInvoiceLifecycle interním zápisem
+     * persistLifecycleState() — veřejná cesta (update/save/forceFill+save)
+     * je nezmění v ŽÁDNÉM stavu. Koncept proto nelze „vystavit" přímým
+     * přepsáním stavu a uhrazení nelze předstírat zápisem paid_amount_minor.
+     */
+    public const array LIFECYCLE_ATTRIBUTES = [
+        'status',
+        'invoice_number',
+        'paid_amount_minor',
+        'issued_at',
+        'paid_at',
+        'cancelled_at',
+    ];
+
+    /**
+     * Sjednocený whitelist interního zápisu — víc než tohle lifecycle
+     * služba zapsat neumí (organization_id, id ani položky sem nepatří).
+     * Úzké vymezení NA OPERACI (vystavení vs. platba vs. storno) drží
+     * IssuedInvoiceLifecycle, který pole jednotlivých zápisů natvrdo
+     * vyjmenovává.
+     */
+    private const array LIFECYCLE_WRITABLE = [
+        'status',
+        'invoice_number',
+        'variable_symbol',
+        'issue_date',
+        'due_date',
+        'supplier_snapshot',
+        'customer_snapshot',
+        'bank_account_snapshot',
+        'footer_text',
+        'logo_snapshot_path',
+        'issued_at',
+        'paid_amount_minor',
+        'paid_at',
+        'cancelled_at',
+    ];
+
+    /**
+     * Příznak probíhajícího interního zápisu. Nastavuje ho POUZE
+     * persistLifecycleState() — je private a žádná veřejná metoda ho
+     * nepřepíná, takže guard níže nejde z aplikačního kódu vypnout.
+     */
+    private bool $inLifecycleWrite = false;
 
     protected $guarded = [];
 
@@ -68,12 +117,6 @@ class IssuedInvoice extends Model
         'margin_vat_minor' => 0,
         'margin_base_minor' => 0,
     ];
-
-    /**
-     * Escape hatch pro lifecycle službu — jednorázově (do dalšího save)
-     * povolí zápis chráněných atributů.
-     */
-    private bool $lifecycleTransitionAllowed = false;
 
     protected function casts(): array
     {
@@ -104,15 +147,26 @@ class IssuedInvoice extends Model
     protected static function booted(): void
     {
         static::updating(function (self $invoice): void {
-            if ($invoice->lifecycleTransitionAllowed) {
-                return;
+            // Tenant identita dokladu je neměnná — bez výjimky a bez ohledu
+            // na stav. „Přesun faktury do jiné organizace" jako operace
+            // neexistuje.
+            if ($invoice->isDirty('organization_id')) {
+                throw ImmutableInvoiceViolation::forTenantChange($invoice);
             }
 
-            $originalStatus = $invoice->getOriginal('status');
+            // Lifecycle pole mění jen interní zápis lifecycle služby.
+            if (! $invoice->inLifecycleWrite) {
+                foreach (self::LIFECYCLE_ATTRIBUTES as $attribute) {
+                    if ($invoice->isDirty($attribute)) {
+                        throw ImmutableInvoiceViolation::forLifecycleAttribute($invoice, $attribute);
+                    }
+                }
+            }
 
-            // Neměnnost hlídáme od okamžiku vystavení (původní stav != draft).
-            if (! $originalStatus instanceof IssuedInvoiceStatus
-                || $originalStatus === IssuedInvoiceStatus::Draft) {
+            // Stav se čte z DATABÁZE, ne z (potenciálně zastaralé) instance.
+            // Jinak by stará draft instance mohla po souběžném vystavení
+            // přepsat chráněné údaje už vystaveného dokladu.
+            if ($invoice->persistedStatus() === IssuedInvoiceStatus::Draft) {
                 return;
             }
 
@@ -123,16 +177,62 @@ class IssuedInvoice extends Model
             }
         });
 
-        static::saved(function (self $invoice): void {
-            $invoice->lifecycleTransitionAllowed = false;
+        static::deleting(function (self $invoice): void {
+            if ($invoice->persistedStatus() !== IssuedInvoiceStatus::Draft) {
+                throw ImmutableInvoiceViolation::forDeletion($invoice);
+            }
         });
     }
 
-    public function allowLifecycleTransition(): static
+    /**
+     * Aktuální stav podle databáze (nikoli podle této PHP instance).
+     * Uvnitř transakce se zamčeným řádkem jde o levné čtení.
+     */
+    public function persistedStatus(): ?IssuedInvoiceStatus
     {
-        $this->lifecycleTransitionAllowed = true;
+        if (! $this->exists) {
+            return null;
+        }
 
-        return $this;
+        $value = static::query()
+            ->withoutGlobalScope('organization')
+            ->whereKey($this->getKey())
+            ->value('status');
+
+        // value() vrací hodnotu už přetypovanou castem, ale u raw dotazů
+        // může přijít i string — přijmeme obojí.
+        return match (true) {
+            $value === null => null,
+            $value instanceof IssuedInvoiceStatus => $value,
+            default => IssuedInvoiceStatus::from((string) $value),
+        };
+    }
+
+    /**
+     * Jediná zápisová cesta lifecycle polí. Je PRIVATE schválně — PHPDoc
+     * `@internal` není přístupový modifikátor a dřívější veřejné metody
+     * applyIssued()/applyPaymentState()/applyCancelled() šly volat odkudkoli
+     * bez validace, zámku i auditu. IssuedInvoiceLifecycle se sem váže přes
+     * Closure::bind do scope modelu (obdoba friend třídy); jiná cesta vede
+     * jen přes reflexi, kterou v PHP nezastaví žádný guard.
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function persistLifecycleState(array $attributes): void
+    {
+        $unexpected = array_diff(array_keys($attributes), self::LIFECYCLE_WRITABLE);
+
+        if ($unexpected !== []) {
+            throw ImmutableInvoiceViolation::forAttribute($this, implode(', ', $unexpected));
+        }
+
+        $this->inLifecycleWrite = true;
+
+        try {
+            $this->forceFill($attributes)->save();
+        } finally {
+            $this->inLifecycleWrite = false;
+        }
     }
 
     public function contact(): BelongsTo

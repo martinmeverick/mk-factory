@@ -21,8 +21,14 @@
 
     <div class="field">
         <label for="ico">IČO</label>
-        <input type="text" id="ico" name="ico" value="{{ old('ico', $contact?->ico) }}">
+        <div class="input-with-button">
+            <input type="text" id="ico" name="ico" inputmode="numeric"
+                   value="{{ old('ico', $contact?->ico) }}" aria-describedby="ico_hint">
+            <button type="button" class="btn" id="ares-lookup">Načíst z ARES</button>
+        </div>
+        <p class="field-hint" id="ico_hint">U firem doplní název a adresu z registru. Fyzické osoby IČO mít nemusí.</p>
         @error('ico')<p class="field-error">{{ $message }}</p>@enderror
+        <p class="ares-status" id="ares-status" role="status" aria-live="polite"></p>
     </div>
 
     <div class="field">
@@ -69,8 +75,67 @@
     </div>
 
     <div class="field span-2">
+        <label for="external_id">Externí identifikátor</label>
+        <input type="text" id="external_id" name="external_id"
+               value="{{ old('external_id', $contact?->external_id) }}"
+               aria-describedby="contact_external_id_hint">
+        <p class="field-hint" id="contact_external_id_hint">
+            Klíč zákazníka v napojeném systému (U Jabka, MEX, Cashflow). Používá se k párování místo názvu.
+        </p>
+        @error('external_id')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field span-2">
         <label for="note">Poznámka</label>
         <textarea id="note" name="note" rows="3">{{ old('note', $contact?->note) }}</textarea>
         @error('note')<p class="field-error">{{ $message }}</p>@enderror
     </div>
 </div>
+
+<script>
+    (function () {
+        const button = document.getElementById('ares-lookup');
+        const status = document.getElementById('ares-status');
+        const field = (id) => document.getElementById(id);
+
+        button.addEventListener('click', async function () {
+            const ico = field('ico').value.trim();
+
+            if (ico === '') {
+                status.textContent = 'Zadejte nejdřív IČO.';
+                return;
+            }
+
+            button.disabled = true;
+            status.textContent = 'Načítám z registru…';
+
+            try {
+                const response = await fetch('/ares/' + encodeURIComponent(ico), {
+                    headers: { 'Accept': 'application/json' },
+                });
+                const payload = await response.json();
+
+                if (!response.ok) {
+                    status.textContent = payload.message ?? 'Načtení se nezdařilo.';
+                    return;
+                }
+
+                const subject = payload.subject;
+                field('name').value = subject.name;
+                field('ico').value = subject.ico;
+                if (subject.dic) field('dic').value = subject.dic;
+                if (subject.street) field('street').value = subject.street;
+                if (subject.city) field('city').value = subject.city;
+                if (subject.zip) field('zip').value = subject.zip;
+                if (subject.country) field('country').value = subject.country;
+
+                status.textContent = 'Načteno z ARESu · '
+                    + (subject.vat_payer ? 'plátce DPH' : 'neplátce DPH');
+            } catch (error) {
+                status.textContent = 'Registr se nepodařilo kontaktovat. Vyplňte údaje ručně.';
+            } finally {
+                button.disabled = false;
+            }
+        });
+    })();
+</script>

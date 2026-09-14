@@ -16,6 +16,8 @@ routes/web.php
             ├─ Tenancy    – CurrentOrganization, BelongsToOrganization
             ├─ Payments   – SpdPayload (QR Platba), CzechIban
             ├─ Pdf        – InvoicePdfData DTO, InvoicePdfRenderer
+            ├─ Ares       – klient registru ARES (viz ARES_INTEGRATION.md)
+            ├─ Contacts   – CzechIco, Supplier/CustomerResolver
             └─ Audit      – AuditLogger
        └─ App\Models (Eloquent, vazby, scopy, enum casty)
 ```

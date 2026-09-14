@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Domain\Invoicing\ImmutablePaymentViolation;
 use App\Domain\Money\Money;
 use App\Domain\Tenancy\BelongsToOrganization;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -21,6 +22,20 @@ class Payment extends Model
             'amount_minor' => 'integer',
             'paid_on' => 'immutable_date',
         ];
+    }
+
+    protected static function booted(): void
+    {
+        // Platby jsou append-only: vznikají jen v lifecycle službách a poté
+        // se nemění ani nemažou, jinak by se rozešly s paid_amount_minor
+        // a stavem dokladu. Storno platby jako operace neexistuje.
+        static::updating(function (): void {
+            throw ImmutablePaymentViolation::forUpdate();
+        });
+
+        static::deleting(function (): void {
+            throw ImmutablePaymentViolation::forDeletion();
+        });
     }
 
     public function payable(): MorphTo

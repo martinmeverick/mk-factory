@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Testy skutečného souběhu nad MariaDB.
+
+    Oddělená konfigurace schválně: hlavní sada běží na SQLite in-memory,
+    kde `SELECT … FOR UPDATE` nic nedělá a souběh by se jen předstíral.
+    Tyto testy proto NESMÍ být součástí rychlé sady a nesmí se vydávat
+    za ověřené, pokud běžely jen na SQLite.
+
+    POZOR: sada volá `migrate:fresh`, tedy ZAHODÍ celé schéma. DB_* hodnoty
+    jsou proto force="true" — bez toho by je přebila proměnná prostředí
+    shellu nebo CI a destruktivní operace by dopadla na cizí databázi.
+    XML je ale konfigurace, ne bezpečnostní hranice: druhou (povinnou)
+    kontrolu dělá Tests\Concurrency\ConcurrencyDatabaseGuard v PHP.
+
+    Hodnoty níž jsou ZÁROVEŇ zdrojem povoleného endpointu závory:
+    spojení `mysql` na 127.0.0.1:3306, databáze `mk_factory_test`.
+    Guard ověřuje celou tuhle identitu z VÝSLEDNÉ runtime konfigurace
+    (tedy i po aplikaci DB_URL) a rozhodne PŘED pokusem o spojení —
+    stejně pojmenované schéma na jiném serveru neprojde. Jiný endpoint
+    vyžaduje úplný opt-in, viz README.
+
+    Spuštění: composer test:concurrency
+-->
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Concurrency">
+            <directory>tests/Concurrency</directory>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="BROADCAST_CONNECTION" value="null"/>
+        <env name="CACHE_STORE" value="array"/>
+        <!-- Skutečná MariaDB, ne SQLite. Vynuceno — viz komentář výše. -->
+        <env name="DB_CONNECTION" value="mysql" force="true"/>
+        <env name="DB_HOST" value="127.0.0.1" force="true"/>
+        <env name="DB_PORT" value="3306" force="true"/>
+        <env name="DB_DATABASE" value="mk_factory_test" force="true"/>
+        <env name="DB_USERNAME" value="root" force="true"/>
+        <env name="DB_PASSWORD" value="" force="true"/>
+        <env name="DB_URL" value="" force="true"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="ARES_ENABLED" value="false"/>
+    </php>
+</phpunit>

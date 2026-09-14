@@ -37,6 +37,12 @@
 - Soubor se ukládá pod náhodným hash názvem; originální název jen v DB
   a v `Content-Disposition` při stažení (Laravel jej sanitizuje).
 - Download výhradně přes autorizovaný controller (auth + org scope).
+- Přidání i smazání přílohy jde přes `ReceivedInvoiceLifecycle`
+  (`attach()` / `deleteAttachment()`) pod zámkem rodičovské faktury —
+  controller o finalitě dokladu nerozhoduje a tenant se ověřuje proti
+  ULOŽENÉ vazbě přílohy, ne proti instanci volajícího. Soubor se maže až
+  po commitu; osiřelý soubor bez odkazu z DB je přijatelný failure window,
+  živý záznam bez souboru není.
 
 ## Neměnnost a integrita dokladů
 

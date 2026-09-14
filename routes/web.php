@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AresLookupController;
 use App\Http\Controllers\AttachmentController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BankAccountController;
@@ -28,6 +29,13 @@ Route::middleware('auth')->group(function () {
 
 Route::middleware(['auth', 'org'])->group(function () {
     Route::get('/', DashboardController::class)->name('dashboard');
+
+    // Předvyplnění z ARESu. Throttle chrání veřejný registr (a naši IP)
+    // před tím, aby ho uživatel přes nás zahltil.
+    Route::middleware('throttle:30,1')->group(function () {
+        Route::get('ares/hledat', [AresLookupController::class, 'search'])->name('ares.search');
+        Route::get('ares/{ico}', [AresLookupController::class, 'show'])->name('ares.show');
+    });
 
     Route::resource('kontakty', ContactController::class)
         ->parameters(['kontakty' => 'contact'])

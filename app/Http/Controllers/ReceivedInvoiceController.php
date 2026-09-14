@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Domain\Contacts\SupplierNotResolvable;
+use App\Domain\Contacts\SupplierResolver;
 use App\Domain\Invoicing\InvalidStateTransition;
+use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\ReceivedInvoiceLifecycle;
 use App\Domain\Money\Money;
 use App\Enums\ContactType;
-use App\Enums\ReceivedInvoiceStatus;
 use App\Http\Requests\ReceivedInvoiceRequest;
 use App\Models\Contact;
 use App\Models\Project;
@@ -17,14 +19,15 @@ use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class ReceivedInvoiceController extends Controller
 {
     public function __construct(
         private readonly ReceivedInvoiceLifecycle $lifecycle,
-    ) {
-    }
+        private readonly SupplierResolver $supplierResolver,
+    ) {}
 
     public function index(Request $request): View
     {
@@ -47,14 +50,17 @@ class ReceivedInvoiceController extends Controller
         return view('received.create', array_merge($this->formOptions(), ['invoice' => null]));
     }
 
-    public function store(ReceivedInvoiceRequest $request, AttachmentController $attachments): RedirectResponse
+    public function store(ReceivedInvoiceRequest $request): RedirectResponse
     {
-        $invoice = DB::transaction(function () use ($request) {
-            return ReceivedInvoice::create($this->data($request));
-        });
+        // Dodavatel se řeší PŘED transakcí: resolver si sám hlídá souběh
+        // a nesmí běžet uvnitř cizí transakce (viz CustomerResolver).
+        $data = $this->data($request);
+
+        $invoice = DB::transaction(fn () => ReceivedInvoice::create($data));
 
         if ($request->hasFile('attachment')) {
-            $attachments->attach($invoice, $request->file('attachment'));
+            // Vlastní transakce se zámkem a kompenzačním úklidem souboru.
+            $this->lifecycle->attach($invoice, $request->file('attachment'));
         }
 
         return redirect()->route('received.show', $invoice)
@@ -80,30 +86,25 @@ class ReceivedInvoiceController extends Controller
 
     public function update(ReceivedInvoiceRequest $request, ReceivedInvoice $received): RedirectResponse
     {
-        if (! $this->isEditable($received)) {
-            return redirect()->route('received.show', $received)
-                ->with('error', 'Uhrazenou nebo zamítnutou fakturu nelze upravovat.');
+        // O editovatelnosti rozhoduje až zamčený řádek v lifecycle vrstvě.
+        try {
+            $this->lifecycle->updateDetails($received, $this->data($request));
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
         }
-
-        $received->update($this->data($request));
 
         return redirect()->route('received.show', $received)->with('status', 'Faktura byla upravena.');
     }
 
     public function destroy(ReceivedInvoice $received): RedirectResponse
     {
-        if ($received->status === ReceivedInvoiceStatus::Paid) {
-            return redirect()->route('received.show', $received)
-                ->with('error', 'Uhrazenou fakturu nelze smazat.');
+        // Smazatelnost rozhoduje aktuální stav zamčeného řádku, ne dřív
+        // načtená instance; přílohy a soubory uklízí lifecycle.
+        try {
+            $this->lifecycle->delete($received);
+        } catch (InvalidStateTransition|InvoiceNotFound $e) {
+            return redirect()->route('received.show', $received)->with('error', $e->getMessage());
         }
-
-        DB::transaction(function () use ($received) {
-            foreach ($received->attachments as $attachment) {
-                \Illuminate\Support\Facades\Storage::disk('local')->delete($attachment->stored_path);
-                $attachment->delete();
-            }
-            $received->delete();
-        });
 
         return redirect()->route('received.index')->with('status', 'Přijatá faktura byla smazána.');
     }
@@ -138,9 +139,13 @@ class ReceivedInvoiceController extends Controller
         return redirect()->route('received.show', $received)->with('status', $message);
     }
 
+    /**
+     * Jen pro rozhodnutí, zda ukázat formulář — o skutečné mutaci
+     * rozhoduje zamčený řádek v lifecycle vrstvě.
+     */
     private function isEditable(ReceivedInvoice $received): bool
     {
-        return in_array($received->status, [ReceivedInvoiceStatus::Received, ReceivedInvoiceStatus::Approved], true);
+        return ! $received->isFinal();
     }
 
     /**
@@ -149,7 +154,7 @@ class ReceivedInvoiceController extends Controller
     private function data(ReceivedInvoiceRequest $request): array
     {
         return [
-            'contact_id' => $request->validated('contact_id'),
+            'contact_id' => $this->resolveSupplierId($request),
             'project_id' => $request->validated('project_id'),
             'supplier_invoice_number' => $request->validated('supplier_invoice_number'),
             'variable_symbol' => $request->validated('variable_symbol'),
@@ -163,6 +168,26 @@ class ReceivedInvoiceController extends Controller
             'currency' => 'CZK',
             'note' => $request->validated('note'),
         ];
+    }
+
+    /**
+     * Dodavatel buď vybraný ze seznamu, nebo dohledaný/založený podle IČO.
+     * Doménovou chybu překládá na chybu formuláře u pole IČO.
+     */
+    private function resolveSupplierId(ReceivedInvoiceRequest $request): int
+    {
+        if ($request->validated('supplier_mode') === 'existing') {
+            return (int) $request->validated('contact_id');
+        }
+
+        try {
+            return $this->supplierResolver->resolveByIco(
+                (string) $request->validated('supplier_ico'),
+                $request->validated('supplier_name'),
+            )->id;
+        } catch (SupplierNotResolvable $e) {
+            throw ValidationException::withMessages(['supplier_ico' => $e->getMessage()]);
+        }
     }
 
     /**

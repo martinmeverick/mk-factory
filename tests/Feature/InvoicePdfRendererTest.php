@@ -48,6 +48,20 @@ final class InvoicePdfRendererTest extends TestCase
         $this->assertGreaterThan(1024, strlen($pdf));
     }
 
+    public function test_rendered_page_preserves_printable_margins(): void
+    {
+        $data = $this->makeData(vatPayer: true, invoiceNumber: 'FV20260007');
+        $renderer = \Barryvdh\DomPDF\Facade\Pdf::loadView('pdf.invoice', ['data' => $data])->setPaper('a4');
+        $renderer->output();
+        $page = $renderer->getDomPDF()->getCss()->get_page_styles()['base'];
+
+        // Assert the renderer's computed page box, not just a CSS declaration:
+        // a root-element margin reset previously overrode the @page rule.
+        foreach (['margin_top' => 14, 'margin_right' => 14, 'margin_left' => 14, 'margin_bottom' => 24] as $edge => $mm) {
+            $this->assertEqualsWithDelta($mm * 72 / 25.4, (float) $page->length_in_pt($page->$edge), 0.05, $edge);
+        }
+    }
+
     public function test_draft_without_number_renders_koncept_pdf(): void
     {
         $data = $this->makeData(vatPayer: true, invoiceNumber: null);
