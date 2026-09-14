@@ -83,10 +83,16 @@ Př.: prefix `FV`, rok 2026, číslo 7, formát `{PREFIX}{YEAR}{NUMBER:4}` →
 | due_date | date | |
 | tax_date | date null | DUZP, volitelné |
 | currency | char(3) default 'CZK' | |
-| subtotal_minor | bigint default 0 | součet základů |
-| vat_total_minor | bigint default 0 | |
-| total_minor | bigint default 0 | |
+| subtotal_minor | bigint default 0 | součet základů (běžný režim); ve zvláštním režimu = součet konečných prodejních cen (= total) |
+| vat_total_minor | bigint default 0 | jen BĚŽNÁ DPH; ve zvláštním režimu 0 (DPH z přirážky je v margin_vat_minor) |
+| total_minor | bigint default 0 | částka k úhradě (dashboard, QR, úhrady) |
 | paid_amount_minor | bigint default 0 | denormalizace ze payments |
+| vat_regime | string(32) default 'standard' | enum `VatRegime`: standard, used_goods_margin; neměnné po vystavení |
+| margin_vat_rate | decimal(5,2) null | interní sazba DPH z přirážky (jen used_goods_margin, nyní jen 21.00) |
+| margin_acquisition_total_minor | bigint default 0 | interní: součet pořizovacích cen |
+| margin_gross_minor | bigint default 0 | interní: kladná přirážka celkem |
+| margin_vat_minor | bigint default 0 | interní: DPH z přirážky |
+| margin_base_minor | bigint default 0 | interní: základ daně z přirážky (NENÍ subtotal_minor) |
 | note | text null | tisková poznámka |
 | internal_note | text null | netiskne se |
 | footer_text | text null | snapshot patičky při vystavení |
@@ -112,6 +118,37 @@ Výpočet (bcmath, zaokrouhlení half-up na celé haléře, po řádcích):
 - `line_vat_minor = round(line_subtotal_minor × vat_rate / 100)` (0 pro null)
 - `line_total_minor = line_subtotal_minor + line_vat_minor`
 Součty faktury = suma řádků. Rekapitulace DPH se skupinuje dle sazby.
+
+Sloupce zvláštního režimu (jen `vat_regime = used_goods_margin`, jinak
+null / 0): `acquisition_unit_price_minor` bigint null (interní pořizovací
+cena za MJ, povinná před vystavením), `line_acquisition_minor`,
+`line_margin_gross_minor`, `line_margin_vat_minor`, `line_margin_base_minor`
+bigint default 0.
+
+## Zvláštní režim - použité zboží (§ 90 ZDPH)
+
+Explicitní režim na úrovni faktury (`vat_regime`), volí ho uživatel; kód
+neposuzuje právní způsobilost prodeje. Jen organizace nastavená jako plátce
+DPH, jen CZK, množství v celých kusech, ceny nezáporné.
+
+- `unit_price_minor` je **konečná prodejní cena za MJ včetně DPH** (DPH se
+  nepřičítá), `vat_rate` položky je null, `line_vat_minor = 0`,
+  `line_subtotal = line_total = quantity × unit_price`.
+- `line_acquisition = quantity × acquisition_unit_price`
+- `line_margin_gross = max(0, line_total − line_acquisition)` (po řádcích,
+  ztrátový řádek se nezapočítává proti ziskovému)
+- `line_margin_vat = round_half_up(line_margin_gross × sazba / (100 + sazba))`
+- `line_margin_base = line_margin_gross − line_margin_vat`
+- hlavička: `margin_*` = suma řádků; `vat_total_minor = 0`.
+
+Příklad: prodej 1 210 Kč, pořízení 1 000 Kč → přirážka 210, DPH 36,45,
+základ 173,55, k úhradě 1 210 Kč.
+
+Doklad odběratele nese text `zvláštní režim - použité zboží` a `DPH se
+nevyčísluje.`; netiskne rekapitulaci DPH, sazby, pořizovací ceny, přirážku ani
+DPH z přirážky, ani text o neplátci. Interní hodnoty vidí jen detail faktury
+v aplikaci. Migrace přidává sloupce s výchozí hodnotou `standard` —
+historické doklady se nereinterpretují.
 
 ## received_invoices
 `organization_id`, `contact_id` FK restrictOnDelete (dodavatel), `project_id`

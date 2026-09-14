@@ -92,6 +92,26 @@ final class Money implements \JsonSerializable, \Stringable
         return new self(self::roundHalfUpToInt($product), $this->currency);
     }
 
+    /**
+     * DPH obsažená v částce včetně daně: částka × sazba / (100 + sazba),
+     * half-up na celé haléře (bcmath, žádný float). Používá se pro DPH
+     * z přirážky ve zvláštním režimu — např. přirážka 210,00 Kč při 21 %
+     * → 36,45 Kč.
+     */
+    public function includedVatAtRate(string $rate): self
+    {
+        $rate = str_replace(',', '.', trim($rate));
+
+        if (! preg_match('/^\d+(\.\d+)?$/', $rate)) {
+            throw new InvalidArgumentException("Neplatná sazba: {$rate}");
+        }
+
+        $divisor = bcadd('100', $rate, 6);
+        $product = bcdiv(bcmul((string) $this->minor, $rate, 6), $divisor, 6);
+
+        return new self(self::roundHalfUpToInt($product), $this->currency);
+    }
+
     public function isZero(): bool
     {
         return $this->minor === 0;

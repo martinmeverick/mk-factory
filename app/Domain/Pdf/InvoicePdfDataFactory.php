@@ -8,6 +8,7 @@ use App\Domain\Money\Money;
 use App\Domain\Payments\QrPaymentImage;
 use App\Domain\Payments\SpdPayload;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use App\Models\IssuedInvoice;
 use App\Models\IssuedInvoiceItem;
 use DateTimeImmutable;
@@ -63,7 +64,13 @@ final class InvoicePdfDataFactory
             ] : null);
 
         $items = $invoice->items->sortBy('position')->values();
-        $vatPayer = $items->contains(fn (IssuedInvoiceItem $item) => $item->vat_rate !== null);
+        $vatRegime = $invoice->vatRegime();
+
+        // Zvláštní režim - použité zboží: dodavatel JE plátce (daňový doklad),
+        // i když položky nenesou sazbu DPH. Rozhoduje uložený režim faktury,
+        // nikdy aktuální nastavení organizace.
+        $vatPayer = $vatRegime === VatRegime::UsedGoodsMargin
+            || $items->contains(fn (IssuedInvoiceItem $item) => $item->vat_rate !== null);
 
         $footerText = $isDraft
             ? $organization->settings?->invoice_footer_text
@@ -96,6 +103,7 @@ final class InvoicePdfDataFactory
             footerText: $footerText,
             logoDataUri: $this->logoDataUri($organization->logo_path),
             qrDataUri: $this->qrDataUri($invoice, $bankAccount, $isDraft),
+            vatRegime: $vatRegime,
         );
     }
 

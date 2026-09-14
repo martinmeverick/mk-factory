@@ -30,7 +30,12 @@ odvození je vždy pravdivé. Totéž platí pro přijaté faktury.
 
 ### issue(IssuedInvoice $invoice): void
 Předpoklady: status draft, ≥1 položka, vyplněný contact_id, number_series_id,
-bank_account_id (pokud organizace účet má). V transakci:
+bank_account_id (pokud organizace účet má). U `vat_regime =
+used_goods_margin` navíc těsně před vystavením: organizace je AKTUÁLNĚ
+plátce DPH, `margin_vat_rate` je podporovaná sazba, měna CZK, každá položka
+má `acquisition_unit_price_minor` (jinak by interní DPH z přirážky byla tiše
+0), ceny nezáporné, množství celé kladné kusy — jinak `InvoiceNotIssuable`.
+V transakci:
 1. přepočítá součty položek (`InvoiceTotalsCalculator`),
 2. přidělí číslo z řady (`InvoiceNumberGenerator`, viz níže),
 3. doplní variable_symbol, pokud je prázdný (číslice z čísla faktury, max 10),
@@ -56,8 +61,14 @@ Jakmile status != draft, model `IssuedInvoice` v `updating` hooku vyhodí
 `App\Domain\Invoicing\ImmutableInvoiceViolation`, pokud se mění chráněný
 atribut: invoice_number, variable_symbol, issue_date, due_date, tax_date,
 contact_id, number_series_id, bank_account_id, currency, subtotal_minor,
-vat_total_minor, total_minor, supplier_snapshot, customer_snapshot,
-bank_account_snapshot, footer_text.
+vat_total_minor, total_minor, vat_regime, margin_vat_rate,
+margin_acquisition_total_minor, margin_gross_minor, margin_vat_minor,
+margin_base_minor, supplier_snapshot, customer_snapshot,
+bank_account_snapshot, footer_text, note.
+
+Režim DPH je uložen na faktuře, ne odvozen z nastavení organizace: pozdější
+přepnutí organizace na neplátce nezmění historickou fakturu ve zvláštním
+režimu (PDF i detail čtou `vat_regime` z dokladu).
 
 Povolené i po vystavení: status, paid_amount_minor, paid_at, cancelled_at,
 issued_at, internal_note, project_id (interní evidence, netiskne se).

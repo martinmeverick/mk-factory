@@ -3,6 +3,13 @@
 
 @section('title', $invoice->invoice_number ?? 'Koncept faktury')
 
+@php
+    // Zvláštní režim - použité zboží: položky nenesou běžnou DPH, interní
+    // evidence přirážky se zobrazuje v samostatném panelu (netiskne se).
+    $isMargin = $invoice->isUsedGoodsMargin();
+    $withVat = ! $isMargin && $invoice->items->contains(fn ($item) => $item->vat_rate !== null);
+@endphp
+
 @section('content')
     <header class="page-header">
         <div>
@@ -67,6 +74,8 @@
                     <dt>DUZP</dt>
                     <dd>{{ Format::date($invoice->tax_date) }}</dd>
                 @endif
+                <dt>Režim DPH</dt>
+                <dd>{{ $invoice->vatRegime()->label() }}</dd>
                 <dt>Bankovní účet</dt>
                 <dd>
                     @if ($invoice->bank_account_snapshot)
@@ -150,14 +159,17 @@
 
     <section class="panel">
         <h2>Položky</h2>
+        @if ($isMargin)
+            <p class="muted">Zvláštní režim - použité zboží: cena za MJ je konečná prodejní cena včetně DPH, DPH se na dokladu nevyčísluje.</p>
+        @endif
         <table class="table">
             <thead>
             <tr>
                 <th>Popis</th>
                 <th class="num">Množství</th>
                 <th>MJ</th>
-                <th class="num">Cena/MJ</th>
-                @if ($invoice->items->contains(fn ($item) => $item->vat_rate !== null))
+                <th class="num">{{ $isMargin ? 'Prodejní cena/MJ' : 'Cena/MJ' }}</th>
+                @if ($withVat)
                     <th class="num">DPH</th>
                     <th class="num">Základ</th>
                     <th class="num">DPH Kč</th>
@@ -166,7 +178,6 @@
             </tr>
             </thead>
             <tbody>
-            @php $withVat = $invoice->items->contains(fn ($item) => $item->vat_rate !== null); @endphp
             @foreach ($invoice->items->sortBy('position') as $item)
                 <tr>
                     <td>{{ $item->description }}</td>
@@ -200,4 +211,53 @@
             </tfoot>
         </table>
     </section>
+
+    @if ($isMargin)
+        <section class="panel">
+            <h2>Interní evidence DPH z přirážky (netiskne se na doklad)</h2>
+            <p class="muted">
+                Sazba DPH z přirážky {{ Format::vatRate($invoice->margin_vat_rate) }}. DPH = kladná přirážka × sazba / (100 + sazba),
+                zaokrouhleno na haléře po položkách. Položky s pořizovací cenou vyšší než prodejní mají přirážku, DPH i základ 0.
+                Tyto hodnoty nejsou součástí položek „Základ“ a „DPH“ běžného režimu (vat_total_minor = 0).
+            </p>
+            <table class="table">
+                <thead>
+                <tr>
+                    <th>Popis</th>
+                    <th class="num">Pořizovací cena/MJ</th>
+                    <th class="num">Prodej celkem</th>
+                    <th class="num">Pořízení celkem</th>
+                    <th class="num">Přirážka</th>
+                    <th class="num">DPH z přirážky</th>
+                    <th class="num">Základ daně z přirážky</th>
+                </tr>
+                </thead>
+                <tbody>
+                @foreach ($invoice->items->sortBy('position') as $item)
+                    <tr>
+                        <td>{{ $item->description }}</td>
+                        <td class="num">
+                            {{ $item->acquisition_unit_price_minor !== null ? Format::money($item->acquisition_unit_price_minor, $invoice->currency) : '— chybí —' }}
+                        </td>
+                        <td class="num">{{ Format::money($item->line_total_minor, $invoice->currency) }}</td>
+                        <td class="num">{{ Format::money($item->line_acquisition_minor, $invoice->currency) }}</td>
+                        <td class="num">{{ Format::money($item->line_margin_gross_minor, $invoice->currency) }}</td>
+                        <td class="num">{{ Format::money($item->line_margin_vat_minor, $invoice->currency) }}</td>
+                        <td class="num">{{ Format::money($item->line_margin_base_minor, $invoice->currency) }}</td>
+                    </tr>
+                @endforeach
+                </tbody>
+                <tfoot>
+                <tr>
+                    <td colspan="2" class="num muted">Celkem</td>
+                    <td class="num"><strong>{{ Format::money($invoice->total_minor, $invoice->currency) }}</strong></td>
+                    <td class="num"><strong>{{ Format::money($invoice->margin_acquisition_total_minor, $invoice->currency) }}</strong></td>
+                    <td class="num"><strong>{{ Format::money($invoice->margin_gross_minor, $invoice->currency) }}</strong></td>
+                    <td class="num"><strong>{{ Format::money($invoice->margin_vat_minor, $invoice->currency) }}</strong></td>
+                    <td class="num"><strong>{{ Format::money($invoice->margin_base_minor, $invoice->currency) }}</strong></td>
+                </tr>
+                </tfoot>
+            </table>
+        </section>
+    @endif
 @endsection

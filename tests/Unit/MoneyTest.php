@@ -85,6 +85,31 @@ class MoneyTest extends TestCase
         $this->assertSame(0, Money::fromMinor(10000, 'CZK')->percentage('0')->getMinor());
     }
 
+    public function test_included_vat_at_rate_rounds_half_up(): void
+    {
+        // Přirážka 210,00 Kč při 21 %: 21000 × 21/121 = 3644,628… → 3645 (36,45 Kč)
+        $this->assertSame(3645, Money::fromMinor(21000, 'CZK')->includedVatAtRate('21.00')->getMinor());
+        $this->assertSame(3645, Money::fromMinor(21000, 'CZK')->includedVatAtRate('21')->getMinor());
+        // 1,00 Kč → 17,355… → 17
+        $this->assertSame(17, Money::fromMinor(100, 'CZK')->includedVatAtRate('21')->getMinor());
+        // 0,05 Kč → 0,867… → 1
+        $this->assertSame(1, Money::fromMinor(5, 'CZK')->includedVatAtRate('21')->getMinor());
+        // 0,02 Kč → 0,347… → 0
+        $this->assertSame(0, Money::fromMinor(2, 'CZK')->includedVatAtRate('21')->getMinor());
+        $this->assertSame(0, Money::zero()->includedVatAtRate('21')->getMinor());
+        // 1 210,00 Kč vč. 21 % → DPH 210,00 Kč (koeficient přesně)
+        $this->assertSame(21000, Money::fromMinor(121000, 'CZK')->includedVatAtRate('21')->getMinor());
+        // Jiná sazba: 112,00 vč. 12 % → 12,00
+        $this->assertSame(1200, Money::fromMinor(11200, 'CZK')->includedVatAtRate('12')->getMinor());
+    }
+
+    public function test_included_vat_at_rate_rejects_invalid_rate(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+
+        Money::fromMinor(100, 'CZK')->includedVatAtRate('21 %');
+    }
+
     public function test_percentage_rejects_invalid_rate(): void
     {
         $this->expectException(InvalidArgumentException::class);

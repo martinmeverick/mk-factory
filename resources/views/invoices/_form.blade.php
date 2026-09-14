@@ -1,6 +1,24 @@
 @php
     /** @var ?\App\Models\IssuedInvoice $invoice */
     use App\Domain\Money\Money;
+    use App\Domain\Money\UsedGoodsMargin;
+    use App\Enums\VatRegime;
+
+    // Režim DPH: old() > uložený koncept > běžný režim. Neplátce má vždy běžný režim.
+    $storedRegime = $invoice?->vatRegime()->value ?? VatRegime::Standard->value;
+    $oldRegime = old('vat_regime', $storedRegime);
+    $currentRegime = is_string($oldRegime) && VatRegime::tryFrom($oldRegime) !== null ? $oldRegime : $storedRegime;
+    if (! $vatPayer) {
+        $currentRegime = VatRegime::Standard->value;
+    }
+    $isMargin = $currentRegime === VatRegime::UsedGoodsMargin->value;
+    $marginDraftOfNonPayer = ! $vatPayer && $storedRegime === VatRegime::UsedGoodsMargin->value;
+
+    $storedMarginRate = $invoice?->margin_vat_rate !== null
+        ? UsedGoodsMargin::rateToOption((string) $invoice->margin_vat_rate)
+        : UsedGoodsMargin::rateOptions()[0];
+    $oldMarginRate = old('margin_vat_rate', $storedMarginRate);
+    $currentMarginRate = is_string($oldMarginRate) ? $oldMarginRate : $storedMarginRate;
 
     $oldItems = old('items');
     if ($oldItems === null && $invoice) {
@@ -10,10 +28,20 @@
             'unit' => $item->unit,
             'unit_price' => Money::fromMinor((int) $item->unit_price_minor)->toDecimalString(),
             'vat_rate' => $item->vat_rate !== null ? (string) (int) $item->vat_rate : null,
+            'acquisition_unit_price' => $item->acquisition_unit_price_minor !== null
+                ? Money::fromMinor((int) $item->acquisition_unit_price_minor)->toDecimalString()
+                : '',
         ])->all();
     }
-    $oldItems = $oldItems ?: [['description' => '', 'quantity' => '1', 'unit' => 'ks', 'unit_price' => '', 'vat_rate' => '21']];
+    $oldItems = $oldItems ?: [['description' => '', 'quantity' => '1', 'unit' => 'ks', 'unit_price' => '', 'vat_rate' => '21', 'acquisition_unit_price' => '']];
 @endphp
+
+@if ($marginDraftOfNonPayer)
+    <div class="flash flash-error" role="alert">
+        Tento koncept je ve zvláštním režimu - použité zboží, ale organizace už není nastavena jako plátce DPH.
+        Uložením se koncept převede do běžného režimu neplátce (pořizovací ceny se zahodí) — zkontrolujte ceny položek.
+    </div>
+@endif
 
 <div class="form-grid">
     <div class="field span-2">
@@ -100,6 +128,48 @@
                    value="{{ old('tax_date', $invoice?->tax_date?->toDateString()) }}">
             @error('tax_date')<p class="field-error">{{ $message }}</p>@enderror
         </div>
+
+        <div class="field">
+            <label for="vat_regime">Režim DPH *</label>
+            <select id="vat_regime" name="vat_regime" aria-describedby="vat_regime_hint">
+                @foreach (VatRegime::cases() as $regime)
+                    <option value="{{ $regime->value }}" @selected($currentRegime === $regime->value)>{{ $regime->label() }}</option>
+                @endforeach
+            </select>
+            <p class="field-hint" id="vat_regime_hint">Režim volíte vy — aplikace neposuzuje, zda prodej podmínky § 90 ZDPH splňuje.</p>
+            @error('vat_regime')<p class="field-error">{{ $message }}</p>@enderror
+        </div>
+
+        <div class="field" data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>
+            <label for="margin_vat_rate">Interní sazba DPH z přirážky *</label>
+            <select id="margin_vat_rate" name="margin_vat_rate" @disabled(! $isMargin) aria-describedby="margin_vat_rate_hint">
+                @foreach (UsedGoodsMargin::rateOptions() as $rate)
+                    <option value="{{ $rate }}" @selected($currentMarginRate === $rate)>{{ $rate }} %</option>
+                @endforeach
+            </select>
+            <p class="field-hint" id="margin_vat_rate_hint">Jen pro interní výpočet DPH z přirážky (použité telefony: 21 %). Na doklad se DPH nevyčísluje.</p>
+            @error('margin_vat_rate')<p class="field-error">{{ $message }}</p>@enderror
+        </div>
+
+        <div class="field span-2" data-regime="standard" @if ($isMargin) hidden @endif>
+            <p class="field-hint">
+                <strong>Běžný režim:</strong> cena za MJ se zadává <strong>bez DPH</strong>, DPH se dopočítá dle sazby položky.
+                Při přepnutí režimu se ceny nepřepočítávají — zkontrolujte je.
+            </p>
+        </div>
+
+        <div class="field span-2" data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>
+            <p class="field-hint">
+                <strong>Zvláštní režim - použité zboží (§ 90 ZDPH):</strong> zadávejte <strong>konečnou prodejní cenu za kus včetně DPH</strong>
+                (částku, kterou zákazník zaplatí — DPH se k ní už nepřičítá) a <strong>interní pořizovací cenu za kus</strong>.
+                DPH se počítá interně jen z kladné přirážky (prodejní − pořizovací cena) a na doklad se nevyčísluje;
+                doklad ponese text „zvláštní režim - použité zboží“. Množství se zadává v celých kusech.
+                Pořizovací cena, přirážka ani DPH z přirážky se na dokladu netisknou.
+                Při přepnutí režimu se ceny nepřepočítávají — zkontrolujte je.
+            </p>
+        </div>
+    @else
+        <input type="hidden" name="vat_regime" value="{{ VatRegime::Standard->value }}">
     @endif
 </div>
 
@@ -110,11 +180,18 @@
     <thead>
     <tr>
         <th>Popis *</th>
-        <th class="w-qty">Množství *</th>
+        <th class="w-qty">
+            <span data-regime="standard" @if ($isMargin) hidden @endif>Množství *</span>
+            <span data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>Množství (celé ks) *</span>
+        </th>
         <th class="w-unit">MJ *</th>
-        <th class="w-price">Cena/MJ *</th>
+        <th class="w-price">
+            <span data-regime="standard" @if ($isMargin) hidden @endif>Cena/MJ{{ $vatPayer ? ' bez DPH' : '' }} *</span>
+            <span data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>Prodejní cena/MJ vč. DPH *</span>
+        </th>
         @if ($vatPayer)
-            <th class="w-vat">DPH %</th>
+            <th class="w-vat" data-regime="standard" @if ($isMargin) hidden @endif>DPH %</th>
+            <th class="w-price" data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>Pořizovací cena/MJ (interní) *</th>
         @endif
         <th class="w-remove"><span class="sr-only">Akce</span></th>
     </tr>
@@ -151,13 +228,21 @@
                 @error("items.{$index}.unit_price")<p class="field-error">{{ $message }}</p>@enderror
             </td>
             @if ($vatPayer)
-                <td>
+                <td data-regime="standard" @if ($isMargin) hidden @endif>
                     <label class="sr-only" for="items-{{ $index }}-vat_rate">Sazba DPH položky {{ $index + 1 }}</label>
-                    <select id="items-{{ $index }}-vat_rate" name="items[{{ $index }}][vat_rate]">
+                    <select id="items-{{ $index }}-vat_rate" name="items[{{ $index }}][vat_rate]" @disabled($isMargin)>
                         @foreach (['21', '12', '0'] as $rate)
                             <option value="{{ $rate }}" @selected(($item['vat_rate'] ?? '21') === $rate)>{{ $rate }} %</option>
                         @endforeach
                     </select>
+                    @error("items.{$index}.vat_rate")<p class="field-error">{{ $message }}</p>@enderror
+                </td>
+                <td data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>
+                    <label class="sr-only" for="items-{{ $index }}-acquisition_unit_price">Pořizovací cena položky {{ $index + 1 }}</label>
+                    <input type="text" id="items-{{ $index }}-acquisition_unit_price" inputmode="decimal"
+                           name="items[{{ $index }}][acquisition_unit_price]"
+                           value="{{ $item['acquisition_unit_price'] ?? '' }}" @disabled(! $isMargin)>
+                    @error("items.{$index}.acquisition_unit_price")<p class="field-error">{{ $message }}</p>@enderror
                 </td>
             @endif
             <td class="w-remove">
@@ -190,12 +275,16 @@
         <td><input type="text" name="items[__I__][unit]" value="ks" aria-label="Jednotka" required></td>
         <td><input type="text" name="items[__I__][unit_price]" inputmode="decimal" aria-label="Cena za jednotku" required></td>
         @if ($vatPayer)
-            <td>
-                <select name="items[__I__][vat_rate]" aria-label="Sazba DPH">
+            <td data-regime="standard" @if ($isMargin) hidden @endif>
+                <select name="items[__I__][vat_rate]" aria-label="Sazba DPH" @disabled($isMargin)>
                     <option value="21" selected>21 %</option>
                     <option value="12">12 %</option>
                     <option value="0">0 %</option>
                 </select>
+            </td>
+            <td data-regime="used_goods_margin" @if (! $isMargin) hidden @endif>
+                <input type="text" name="items[__I__][acquisition_unit_price]" inputmode="decimal"
+                       aria-label="Pořizovací cena za jednotku (interní)" @disabled(! $isMargin)>
             </td>
         @endif
         <td class="w-remove">
@@ -209,10 +298,30 @@
         let index = {{ count($oldItems) }};
         const body = document.getElementById('items-body');
         const template = document.getElementById('item-row-template');
+        const regimeSelect = document.getElementById('vat_regime');
+
+        // Přepínání polí dle režimu DPH: neaktivní pole se skryjí a zakážou
+        // (disabled → neodesílají se), takže server dostane jen pole zvoleného
+        // režimu. Bez JS platí stav vykreslený serverem dle uloženého/old() režimu.
+        function applyRegime() {
+            const value = regimeSelect ? regimeSelect.value : 'standard';
+            document.querySelectorAll('[data-regime]').forEach(function (element) {
+                const active = element.dataset.regime === value;
+                element.hidden = !active;
+                element.querySelectorAll('input, select, textarea').forEach(function (control) {
+                    control.disabled = !active;
+                });
+            });
+        }
+
+        if (regimeSelect) {
+            regimeSelect.addEventListener('change', applyRegime);
+        }
 
         document.getElementById('add-item').addEventListener('click', function () {
             const html = template.innerHTML.replaceAll('__I__', String(index++));
             body.insertAdjacentHTML('beforeend', html);
+            applyRegime();
             body.lastElementChild.querySelector('input').focus();
         });
 

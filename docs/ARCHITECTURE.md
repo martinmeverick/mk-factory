@@ -55,6 +55,12 @@ REST API bez HTML vrstvy (viz INTEGRATION_CONTRACT.md).
   Režim neplátce: vat_rate null, DPH 0, na PDF se DPH sekce nezobrazuje.
 - Sazby DPH ČR (2026): 21 %, 12 %, 0 % — nabídka v UI; sloupec je obecný
   DECIMAL, výpočet funguje pro libovolnou sazbu.
+- Zvláštní režim - použité zboží (§ 90): `App\Enums\VatRegime` (režim na
+  faktuře), `App\Domain\Money\UsedGoodsMargin` (povinný text, podporované
+  sazby, pravidlo celých kusů), `Money::includedVatAtRate()` (koeficient
+  sazba/(100+sazba)), `InvoiceTotalsCalculator::calculateMarginLine()`.
+  Interní DPH z přirážky je v oddělených `margin_*` polích — nikdy
+  v `vat_total_minor`/`subtotal_minor`. PDF DTO interní pole nenese.
 
 ## QR Platba (kontrakt pro App\Domain\Payments)
 

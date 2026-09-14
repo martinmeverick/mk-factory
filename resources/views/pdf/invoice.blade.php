@@ -383,7 +383,7 @@
 {{-- Položky --}}
 <table class="items">
     <thead>
-        @if ($data->vatPayer)
+        @if ($data->showsVatColumns())
             <tr>
                 <th style="width: 34%;">Popis</th>
                 <th class="num" style="width: 8%;">Množství</th>
@@ -406,7 +406,7 @@
     </thead>
     <tbody>
         @foreach ($data->items as $line)
-            @if ($data->vatPayer)
+            @if ($data->showsVatColumns())
                 <tr>
                     <td>{{ $line->description }}</td>
                     <td class="num">{{ $line->quantityFormatted() }}</td>
@@ -434,12 +434,16 @@
 <table class="summary">
     <tr>
         <td class="spacer">
-            @unless ($data->vatPayer)
+            @if ($data->isUsedGoodsMargin())
+                {{-- § 90 odst. 14 ZDPH: povinný text, DPH z přirážky se nevyčísluje. --}}
+                <div class="vat-note">{{ $data->usedGoodsMarginNotice() }}</div>
+                <div class="vat-note">{{ $data->usedGoodsMarginNoticeSupplement() }}</div>
+            @elseif (! $data->vatPayer)
                 <div class="vat-note">Dodavatel není plátcem DPH.</div>
-            @endunless
+            @endif
         </td>
         <td>
-            @if ($data->vatPayer)
+            @if ($data->showsVatColumns())
                 <table class="recap">
                     <thead>
                         <tr>

@@ -10,6 +10,7 @@ use App\Domain\Payments\SpdPayload;
 use App\Domain\Pdf\InvoicePdfData;
 use App\Domain\Pdf\InvoicePdfLine;
 use App\Domain\Pdf\InvoicePdfRenderer;
+use App\Enums\VatRegime;
 use Carbon\CarbonImmutable;
 use DateTimeImmutable;
 use Tests\TestCase;
@@ -57,6 +58,20 @@ final class InvoicePdfRendererTest extends TestCase
         $this->assertGreaterThan(1024, strlen($pdf));
     }
 
+    public function test_used_goods_margin_invoice_renders_valid_pdf(): void
+    {
+        $data = $this->makeData(
+            vatPayer: true,
+            invoiceNumber: 'FV20260010',
+            vatRegime: VatRegime::UsedGoodsMargin,
+        );
+
+        $pdf = new InvoicePdfRenderer()->render($data);
+
+        $this->assertStringStartsWith('%PDF', $pdf);
+        $this->assertGreaterThan(1024, strlen($pdf));
+    }
+
     public function test_rendered_html_for_non_vat_payer_has_no_vat_recap(): void
     {
         $data = $this->makeData(vatPayer: false, invoiceNumber: 'FV20260009');
@@ -67,6 +82,7 @@ final class InvoicePdfRendererTest extends TestCase
         $this->assertStringNotContainsString('DUZP', $html);
         $this->assertStringContainsString('Dodavatel není plátcem DPH.', $html);
         $this->assertStringContainsString('Celkem k úhradě', $html);
+        $this->assertStringNotContainsString('zvláštní režim', $html);
     }
 
     public function test_rendered_html_for_vat_payer_has_vat_recap_and_czech_items(): void
@@ -80,6 +96,32 @@ final class InvoicePdfRendererTest extends TestCase
         $this->assertStringContainsString('Instalace čpavkového chlazení, měření a regulace', $html);
         $this->assertStringContainsString('2,5', $html);   // 2.500 bez koncových nul
         $this->assertStringNotContainsString('2.500', $html);
+        $this->assertStringNotContainsString('zvláštní režim', $html);
+    }
+
+    public function test_rendered_html_for_used_goods_margin_has_notice_and_no_vat_figures(): void
+    {
+        $data = $this->makeData(
+            vatPayer: true,
+            invoiceNumber: 'FV20260010',
+            vatRegime: VatRegime::UsedGoodsMargin,
+        );
+
+        $html = view('pdf.invoice', ['data' => $data])->render();
+
+        $this->assertStringContainsString('FAKTURA č. FV20260010', $html);
+        $this->assertStringContainsString('Daňový doklad', $html);
+        $this->assertStringContainsString('zvláštní režim - použité zboží', $html);
+        $this->assertStringContainsString('DPH se nevyčísluje.', $html);
+        $this->assertStringContainsString('DUZP', $html);
+        $this->assertStringContainsString('DIČ: CZ12345678', $html);
+        $this->assertStringContainsString('Celkem k úhradě', $html);
+        $this->assertStringContainsString("3\u{A0}500,00\u{A0}Kč", $html);
+
+        $this->assertStringNotContainsString('Rekapitulace DPH', $html);
+        $this->assertStringNotContainsString('Dodavatel není plátcem DPH', $html);
+        $this->assertStringNotContainsString('DPH&nbsp;%', $html);
+        $this->assertStringNotContainsString('Základ', $html);
     }
 
     public function test_rendered_html_for_draft_shows_koncept_marking(): void
@@ -98,8 +140,11 @@ final class InvoicePdfRendererTest extends TestCase
         ?string $invoiceNumber,
         ?string $logoDataUri = null,
         ?string $qrDataUri = null,
+        VatRegime $vatRegime = VatRegime::Standard,
     ): InvoicePdfData {
-        $vatRate = $vatPayer ? '21.00' : null;
+        // Zvláštní režim: řádky bez běžné DPH, ceny jsou konečné.
+        $withVat = $vatPayer && $vatRegime !== VatRegime::UsedGoodsMargin;
+        $vatRate = $withVat ? '21.00' : null;
 
         $lineOne = new InvoicePdfLine(
             description: 'Instalace čpavkového chlazení, měření a regulace',
@@ -108,8 +153,8 @@ final class InvoicePdfRendererTest extends TestCase
             unitPrice: Money::fromMinor(120000),
             vatRate: $vatRate,
             lineSubtotal: Money::fromMinor(300000),
-            lineVat: Money::fromMinor($vatPayer ? 63000 : 0),
-            lineTotal: Money::fromMinor($vatPayer ? 363000 : 300000),
+            lineVat: Money::fromMinor($withVat ? 63000 : 0),
+            lineTotal: Money::fromMinor($withVat ? 363000 : 300000),
         );
 
         $lineTwo = new InvoicePdfLine(
@@ -119,12 +164,12 @@ final class InvoicePdfRendererTest extends TestCase
             unitPrice: Money::fromMinor(50000),
             vatRate: $vatRate,
             lineSubtotal: Money::fromMinor(50000),
-            lineVat: Money::fromMinor($vatPayer ? 10500 : 0),
-            lineTotal: Money::fromMinor($vatPayer ? 60500 : 50000),
+            lineVat: Money::fromMinor($withVat ? 10500 : 0),
+            lineTotal: Money::fromMinor($withVat ? 60500 : 50000),
         );
 
         $subtotal = Money::fromMinor(350000);
-        $total = Money::fromMinor($vatPayer ? 423500 : 350000);
+        $total = Money::fromMinor($withVat ? 423500 : 350000);
 
         return new InvoicePdfData(
             supplier: [
@@ -161,7 +206,7 @@ final class InvoicePdfRendererTest extends TestCase
             ],
             items: [$lineOne, $lineTwo],
             subtotal: $subtotal,
-            vatBreakdown: $vatPayer
+            vatBreakdown: $withVat
                 ? [['rate' => '21.00', 'base' => $subtotal, 'vat' => Money::fromMinor(73500)]]
                 : [],
             total: $total,
@@ -170,6 +215,7 @@ final class InvoicePdfRendererTest extends TestCase
             footerText: 'U Jabka Demo s.r.o., zapsána v OR u Městského soudu v Praze, oddíl C.',
             logoDataUri: $logoDataUri,
             qrDataUri: $qrDataUri,
+            vatRegime: $vatRegime,
         );
     }
 

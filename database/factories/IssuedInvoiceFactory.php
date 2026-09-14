@@ -4,6 +4,7 @@ namespace Database\Factories;
 
 use App\Enums\ContactType;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use App\Models\Contact;
 use App\Models\IssuedInvoice;
 use App\Models\Organization;
@@ -38,6 +39,12 @@ class IssuedInvoiceFactory extends Factory
             'vat_total_minor' => 21000,
             'total_minor' => 121000,
             'paid_amount_minor' => 0,
+            'vat_regime' => VatRegime::Standard,
+            'margin_vat_rate' => null,
+            'margin_acquisition_total_minor' => 0,
+            'margin_gross_minor' => 0,
+            'margin_vat_minor' => 0,
+            'margin_base_minor' => 0,
             'note' => null,
             'internal_note' => null,
             'footer_text' => null,
@@ -66,6 +73,22 @@ class IssuedInvoiceFactory extends Factory
             'invoice_number' => fake()->unique()->numerify('FV2026####'),
             'variable_symbol' => fake()->unique()->numerify('2026####'),
             'issued_at' => now(),
+        ]);
+    }
+
+    /**
+     * Zvláštní režim - použité zboží (§ 90): interní sazba 21 %, položky
+     * dostávají pořizovací cenu přes IssuedInvoiceItemFactory::usedGoods().
+     * Součty se nastavují na 0 — dopočítá je InvoiceTotalsCalculator.
+     */
+    public function usedGoodsMargin(): static
+    {
+        return $this->state([
+            'vat_regime' => VatRegime::UsedGoodsMargin,
+            'margin_vat_rate' => '21.00',
+            'subtotal_minor' => 0,
+            'vat_total_minor' => 0,
+            'total_minor' => 0,
         ]);
     }
 

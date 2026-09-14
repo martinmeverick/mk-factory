@@ -25,6 +25,12 @@ class IssuedInvoiceItem extends Model
             'line_subtotal_minor' => 'integer',
             'line_vat_minor' => 'integer',
             'line_total_minor' => 'integer',
+            // Zvláštní režim - použité zboží: interní pořizovací cena a přirážka.
+            'acquisition_unit_price_minor' => 'integer',
+            'line_acquisition_minor' => 'integer',
+            'line_margin_gross_minor' => 'integer',
+            'line_margin_vat_minor' => 'integer',
+            'line_margin_base_minor' => 'integer',
         ];
     }
 

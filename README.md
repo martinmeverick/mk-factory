@@ -78,6 +78,8 @@ není potřeba.
 ## Omezení MVP
 
 - Jen CZK, jedna jazyková verze (čeština).
+- Zvláštní režim DPH jen „použité zboží“ (§ 90) s interní sazbou 21 %, ručně
+  vystavované faktury plátce DPH; ostatní zvláštní režimy nejsou podporovány.
 - Bez e-mailů, bankovního párování, OCR, dobropisů, záloh — viz
   `docs/FUTURE_BACKLOG.md`.
 - Role owner/member zatím bez rozdílu oprávnění.

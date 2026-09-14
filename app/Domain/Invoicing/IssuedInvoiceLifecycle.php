@@ -6,7 +6,9 @@ namespace App\Domain\Invoicing;
 
 use App\Domain\Audit\AuditLogger;
 use App\Domain\Money\InvoiceTotalsCalculator;
+use App\Domain\Money\UsedGoodsMargin;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use App\Models\BankAccount;
 use App\Models\Contact;
 use App\Models\InvoiceNumberSeries;
@@ -65,7 +67,15 @@ final class IssuedInvoiceLifecycle
             throw InvoiceNotIssuable::because('není vybrán bankovní účet.');
         }
 
-        DB::transaction(function () use ($invoice, $issueDate, $organization): void {
+        $settings = $organization->settings()->withoutGlobalScope('organization')->first();
+
+        // Zvláštní režim - použité zboží: opětovná kontrola těsně před
+        // vystavením (nastavení organizace se mohlo od uložení konceptu změnit).
+        if ($invoice->vatRegime() === VatRegime::UsedGoodsMargin) {
+            $this->assertUsedGoodsMarginIssuable($invoice, $settings);
+        }
+
+        DB::transaction(function () use ($invoice, $issueDate, $organization, $settings): void {
             $this->totalsCalculator->recalculate($invoice);
 
             /** @var InvoiceNumberSeries $series */
@@ -79,7 +89,6 @@ final class IssuedInvoiceLifecycle
                 $variableSymbol = substr((string) preg_replace('/\D/', '', $number), -10);
             }
 
-            $settings = $organization->settings()->withoutGlobalScope('organization')->first();
             $resolvedIssueDate = $issueDate ?? CarbonImmutable::today();
             $dueDate = $invoice->due_date
                 ?? $resolvedIssueDate->addDays($settings?->default_due_days ?? 14);
@@ -100,8 +109,52 @@ final class IssuedInvoiceLifecycle
             $this->auditLogger->log('invoice.issued', $invoice, [
                 'status' => ['from' => IssuedInvoiceStatus::Draft->value, 'to' => IssuedInvoiceStatus::Issued->value],
                 'invoice_number' => $number,
+                'vat_regime' => $invoice->vatRegime()->value,
             ]);
         });
+    }
+
+    /**
+     * Předpoklady zvláštního režimu - použité zboží (§ 90 ZDPH). Kód
+     * neposuzuje právní způsobilost prodeje — hlídá jen konzistenci dat:
+     * organizace je plátce DPH, je zadána podporovaná interní sazba, měna
+     * CZK, každá položka má pořizovací cenu, ceny nejsou záporné a množství
+     * jsou celé kusy. Bez toho by interní DPH z přirážky byla tiše nulová
+     * nebo by doklad nesl nepravdivý údaj o plátcovství.
+     */
+    private function assertUsedGoodsMarginIssuable(IssuedInvoice $invoice, ?OrganizationSettings $settings): void
+    {
+        if (! (bool) $settings?->vat_payer) {
+            throw InvoiceNotIssuable::because(
+                'zvláštní režim - použité zboží lze použít jen u plátce DPH, organizace je nyní nastavena jako neplátce.'
+            );
+        }
+
+        $rate = $invoice->margin_vat_rate === null ? null : (string) $invoice->margin_vat_rate;
+
+        if (! UsedGoodsMargin::isSupportedRate($rate)) {
+            throw InvoiceNotIssuable::because('u zvláštního režimu chybí nebo není podporována interní sazba DPH z přirážky.');
+        }
+
+        if (strtoupper((string) $invoice->currency) !== UsedGoodsMargin::CURRENCY) {
+            throw InvoiceNotIssuable::because('zvláštní režim - použité zboží je podporován jen v CZK.');
+        }
+
+        foreach ($invoice->items()->get() as $item) {
+            $label = '„'.$item->description.'“';
+
+            if ($item->acquisition_unit_price_minor === null) {
+                throw InvoiceNotIssuable::because("položka {$label} nemá zadanou pořizovací cenu.");
+            }
+
+            if ((int) $item->acquisition_unit_price_minor < 0 || (int) $item->unit_price_minor < 0) {
+                throw InvoiceNotIssuable::because("položka {$label} má zápornou cenu, ve zvláštním režimu to není povoleno.");
+            }
+
+            if (! UsedGoodsMargin::isWholePositiveQuantity((string) $item->quantity)) {
+                throw InvoiceNotIssuable::because("položka {$label} musí mít množství v celých kusech (alespoň 1).");
+            }
+        }
     }
 
     public function registerPayment(

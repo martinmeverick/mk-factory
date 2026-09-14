@@ -6,6 +6,7 @@ use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Domain\Money\Money;
 use App\Domain\Tenancy\BelongsToOrganization;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -35,6 +36,14 @@ class IssuedInvoice extends Model
         'subtotal_minor',
         'vat_total_minor',
         'total_minor',
+        // Režim DPH a interní evidence přirážky (zvláštní režim - použité zboží)
+        // jsou po vystavení součástí dokladu / daňové evidence.
+        'vat_regime',
+        'margin_vat_rate',
+        'margin_acquisition_total_minor',
+        'margin_gross_minor',
+        'margin_vat_minor',
+        'margin_base_minor',
         'supplier_snapshot',
         'customer_snapshot',
         'bank_account_snapshot',
@@ -52,6 +61,12 @@ class IssuedInvoice extends Model
         'vat_total_minor' => 0,
         'total_minor' => 0,
         'paid_amount_minor' => 0,
+        'vat_regime' => 'standard',
+        'margin_vat_rate' => null,
+        'margin_acquisition_total_minor' => 0,
+        'margin_gross_minor' => 0,
+        'margin_vat_minor' => 0,
+        'margin_base_minor' => 0,
     ];
 
     /**
@@ -74,6 +89,12 @@ class IssuedInvoice extends Model
             'vat_total_minor' => 'integer',
             'total_minor' => 'integer',
             'paid_amount_minor' => 'integer',
+            'vat_regime' => VatRegime::class,
+            'margin_vat_rate' => 'decimal:2',
+            'margin_acquisition_total_minor' => 'integer',
+            'margin_gross_minor' => 'integer',
+            'margin_vat_minor' => 'integer',
+            'margin_base_minor' => 'integer',
             'supplier_snapshot' => 'array',
             'customer_snapshot' => 'array',
             'bank_account_snapshot' => 'array',
@@ -190,5 +211,49 @@ class IssuedInvoice extends Model
     public function isEditable(): bool
     {
         return $this->status === IssuedInvoiceStatus::Draft;
+    }
+
+    /**
+     * Režim DPH — u starších záznamů bez hodnoty se chová jako 'standard'
+     * (dosavadní chování), nikdy nic nereinterpretuje.
+     */
+    public function vatRegime(): VatRegime
+    {
+        $regime = $this->vat_regime;
+
+        if ($regime instanceof VatRegime) {
+            return $regime;
+        }
+
+        return VatRegime::tryFrom((string) ($regime ?? '')) ?? VatRegime::Standard;
+    }
+
+    public function isUsedGoodsMargin(): bool
+    {
+        return $this->vatRegime() === VatRegime::UsedGoodsMargin;
+    }
+
+    /** Interní: součet pořizovacích cen (zvláštní režim). */
+    public function marginAcquisitionTotalMoney(): Money
+    {
+        return Money::fromMinor((int) $this->margin_acquisition_total_minor, $this->currency);
+    }
+
+    /** Interní: kladná přirážka celkem (zvláštní režim). */
+    public function marginGrossMoney(): Money
+    {
+        return Money::fromMinor((int) $this->margin_gross_minor, $this->currency);
+    }
+
+    /** Interní: DPH z přirážky (zvláštní režim) — NENÍ součástí vat_total_minor. */
+    public function marginVatMoney(): Money
+    {
+        return Money::fromMinor((int) $this->margin_vat_minor, $this->currency);
+    }
+
+    /** Interní: základ daně z přirážky (zvláštní režim) — NENÍ subtotal_minor. */
+    public function marginBaseMoney(): Money
+    {
+        return Money::fromMinor((int) $this->margin_base_minor, $this->currency);
     }
 }

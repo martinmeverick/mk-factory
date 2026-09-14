@@ -6,6 +6,7 @@ namespace Tests\Feature\Domain;
 
 use App\Domain\Invoicing\ImmutableInvoiceViolation;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use App\Models\IssuedInvoice;
 use App\Models\IssuedInvoiceItem;
 use App\Models\Project;
@@ -41,6 +42,28 @@ class ImmutabilityTest extends TestCase
         $this->expectException(ImmutableInvoiceViolation::class);
 
         $invoice->update(['total_minor' => 1]);
+    }
+
+    public function test_changing_vat_regime_after_issue_throws(): void
+    {
+        $invoice = IssuedInvoice::factory()->issued()->create();
+
+        $this->expectException(ImmutableInvoiceViolation::class);
+
+        $invoice->update(['vat_regime' => VatRegime::UsedGoodsMargin]);
+    }
+
+    public function test_changing_margin_evidence_after_issue_throws(): void
+    {
+        $invoice = IssuedInvoice::factory()->usedGoodsMargin()->issued()->create([
+            'margin_gross_minor' => 21000,
+            'margin_vat_minor' => 3645,
+            'margin_base_minor' => 17355,
+        ]);
+
+        $this->expectException(ImmutableInvoiceViolation::class);
+
+        $invoice->update(['margin_vat_minor' => 0]);
     }
 
     public function test_protected_change_is_not_persisted(): void

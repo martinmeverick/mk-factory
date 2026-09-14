@@ -9,9 +9,11 @@ use App\Domain\Invoicing\InvoiceNotIssuable;
 use App\Domain\Invoicing\IssuedInvoiceLifecycle;
 use App\Domain\Money\InvoiceTotalsCalculator;
 use App\Domain\Money\Money;
+use App\Domain\Money\UsedGoodsMargin;
 use App\Domain\Tenancy\CurrentOrganization;
 use App\Enums\ContactType;
 use App\Enums\IssuedInvoiceStatus;
+use App\Enums\VatRegime;
 use App\Http\Requests\IssuedInvoiceRequest;
 use App\Http\Requests\PaymentRequest;
 use App\Models\BankAccount;
@@ -24,6 +26,7 @@ use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class IssuedInvoiceController extends Controller
@@ -203,8 +206,20 @@ class IssuedInvoiceController extends Controller
     {
         $settings = app(CurrentOrganization::class)->getOrFail()->settings;
         $vatPayer = (bool) $settings?->vat_payer;
+        $regime = $request->vatRegime();
+
+        // Pojistka k FormRequestu: zvláštní režim jen u plátce DPH.
+        if ($regime === VatRegime::UsedGoodsMargin && ! $vatPayer) {
+            throw ValidationException::withMessages([
+                'vat_regime' => 'Zvláštní režim - použité zboží lze zvolit jen u organizace nastavené jako plátce DPH.',
+            ]);
+        }
 
         return [
+            'vat_regime' => $regime,
+            'margin_vat_rate' => $regime === VatRegime::UsedGoodsMargin
+                ? UsedGoodsMargin::normalizeRate((string) $request->validated('margin_vat_rate'))
+                : null,
             'contact_id' => $request->validated('contact_id'),
             'project_id' => $request->validated('project_id'),
             'bank_account_id' => $request->validated('bank_account_id'),
@@ -229,16 +244,22 @@ class IssuedInvoiceController extends Controller
     {
         $settings = app(CurrentOrganization::class)->getOrFail()->settings;
         $vatPayer = (bool) $settings?->vat_payer;
+        $margin = $invoice->vatRegime() === VatRegime::UsedGoodsMargin;
 
         foreach (array_values($items) as $position => $item) {
             $invoice->items()->create([
                 'organization_id' => $invoice->organization_id,
                 'position' => $position + 1,
                 'description' => $item['description'],
-                'quantity' => str_replace(',', '.', $item['quantity']),
+                'quantity' => str_replace(',', '.', (string) $item['quantity']),
                 'unit' => $item['unit'],
+                // Zvláštní režim: konečná prodejní cena vč. DPH; běžný režim: cena bez DPH.
                 'unit_price_minor' => Money::fromDecimalString($item['unit_price'], 'CZK')->getMinor(),
-                'vat_rate' => $vatPayer ? ($item['vat_rate'] ?? '0') : null,
+                // Zvláštní režim nenese běžnou sazbu DPH u položky.
+                'vat_rate' => $margin ? null : ($vatPayer ? ($item['vat_rate'] ?? '0') : null),
+                'acquisition_unit_price_minor' => $margin
+                    ? Money::fromDecimalString($item['acquisition_unit_price'], 'CZK')->getMinor()
+                    : null,
                 'line_subtotal_minor' => 0,
                 'line_vat_minor' => 0,
                 'line_total_minor' => 0,
