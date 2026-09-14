@@ -2,7 +2,19 @@
     /** @var ?\App\Models\IssuedInvoice $invoice */
     use App\Domain\Money\Money;
     use App\Domain\Money\UsedGoodsMargin;
+    use App\Enums\InvoiceRecipientMode;
     use App\Enums\VatRegime;
+    use App\Http\Requests\IssuedInvoiceRequest;
+
+    // Způsob zadání odběratele: old() > výběr z kontaktů. Koncept založený
+    // s ručně zadanou osobou se edituje jako běžný kontakt (osoba už je
+    // v kontaktech) — nová osoba vzniká jen po explicitním přepnutí.
+    $oldMode = old('recipient_mode');
+    $recipientMode = is_string($oldMode) ? (InvoiceRecipientMode::tryFrom($oldMode) ?? InvoiceRecipientMode::Existing) : InvoiceRecipientMode::Existing;
+    $isManualRecipient = $recipientMode === InvoiceRecipientMode::Manual;
+    $oldPerson = old('person');
+    $oldPerson = is_array($oldPerson) ? $oldPerson : [];
+    $personValue = fn (string $key, string $default = ''): string => is_string($oldPerson[$key] ?? null) ? $oldPerson[$key] : $default;
 
     // Režim DPH: old() > uložený koncept > běžný režim. Neplátce má vždy běžný režim.
     $storedRegime = $invoice?->vatRegime()->value ?? VatRegime::Standard->value;
@@ -44,9 +56,29 @@
 @endif
 
 <div class="form-grid">
-    <div class="field span-2">
-        <label for="contact_id">Odběratel *</label>
-        <select id="contact_id" name="contact_id" required>
+    <fieldset class="field span-2 field-group" aria-describedby="recipient_mode_hint">
+        <legend>Odběratel *</legend>
+        <div class="inline-form">
+            @foreach (InvoiceRecipientMode::cases() as $mode)
+                <div class="field-checkbox">
+                    <label for="recipient_mode_{{ $mode->value }}">
+                        <input type="radio" id="recipient_mode_{{ $mode->value }}" name="recipient_mode"
+                               value="{{ $mode->value }}" @checked($recipientMode === $mode)>
+                        {{ $mode->label() }}
+                    </label>
+                </div>
+            @endforeach
+        </div>
+        <p class="field-hint" id="recipient_mode_hint">
+            Fyzickou osobu (bez IČO a DIČ) zadáte přímo zde — uloží se do kontaktů jako odběratel
+            společně s konceptem, nemusíte ji zakládat předem.
+        </p>
+        @error('recipient_mode')<p class="field-error">{{ $message }}</p>@enderror
+    </fieldset>
+
+    <div class="field span-2" data-recipient="{{ InvoiceRecipientMode::Existing->value }}" @if ($isManualRecipient) hidden @endif>
+        <label for="contact_id">Odběratel z kontaktů *</label>
+        <select id="contact_id" name="contact_id" required @disabled($isManualRecipient)>
             <option value="">— vyberte —</option>
             @foreach ($customers as $customer)
                 <option value="{{ $customer->id }}" @selected((int) old('contact_id', $invoice?->contact_id) === $customer->id)>
@@ -55,6 +87,51 @@
             @endforeach
         </select>
         @error('contact_id')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field span-2" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_name">Jméno a příjmení *</label>
+        <input type="text" id="person_name" name="person[name]" maxlength="255" autocomplete="name"
+               value="{{ $personValue('name') }}" required @disabled(! $isManualRecipient)>
+        @error('person')<p class="field-error">{{ $message }}</p>@enderror
+        @error('person.name')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_street">Ulice a číslo *</label>
+        <input type="text" id="person_street" name="person[street]" maxlength="255" autocomplete="street-address"
+               value="{{ $personValue('street') }}" required @disabled(! $isManualRecipient)>
+        @error('person.street')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_city">Město *</label>
+        <input type="text" id="person_city" name="person[city]" maxlength="255" autocomplete="address-level2"
+               value="{{ $personValue('city') }}" required @disabled(! $isManualRecipient)>
+        @error('person.city')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_zip">PSČ *</label>
+        <input type="text" id="person_zip" name="person[zip]" maxlength="20" autocomplete="postal-code"
+               value="{{ $personValue('zip') }}" required @disabled(! $isManualRecipient)>
+        @error('person.zip')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_country">Země (kód) *</label>
+        <input type="text" id="person_country" name="person[country]" maxlength="2" autocomplete="country"
+               autocapitalize="characters" value="{{ $personValue('country', 'CZ') }}" required @disabled(! $isManualRecipient)
+               aria-describedby="person_country_hint">
+        <p class="field-hint" id="person_country_hint">Dvoupísmenný kód země, výchozí CZ.</p>
+        @error('person.country')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+
+    <div class="field" data-recipient="{{ InvoiceRecipientMode::Manual->value }}" @if (! $isManualRecipient) hidden @endif>
+        <label for="person_email">E-mail</label>
+        <input type="email" id="person_email" name="person[email]" maxlength="255" autocomplete="email"
+               value="{{ $personValue('email') }}" @disabled(! $isManualRecipient)>
+        @error('person.email')<p class="field-error">{{ $message }}</p>@enderror
     </div>
 
     <div class="field">
@@ -317,6 +394,26 @@
         if (regimeSelect) {
             regimeSelect.addEventListener('change', applyRegime);
         }
+
+        // Způsob zadání odběratele: neaktivní část se skryje a zakáže
+        // (disabled → neodesílá se), takže server nikdy nedostane vybraný
+        // kontakt a ručně zadanou osobu zároveň. Bez JS platí stav vykreslený
+        // serverem dle old() režimu.
+        function applyRecipientMode() {
+            const checked = document.querySelector('input[name="recipient_mode"]:checked');
+            const value = checked ? checked.value : 'existing';
+            document.querySelectorAll('[data-recipient]').forEach(function (element) {
+                const active = element.dataset.recipient === value;
+                element.hidden = !active;
+                element.querySelectorAll('input, select').forEach(function (control) {
+                    control.disabled = !active;
+                });
+            });
+        }
+
+        document.querySelectorAll('input[name="recipient_mode"]').forEach(function (radio) {
+            radio.addEventListener('change', applyRecipientMode);
+        });
 
         document.getElementById('add-item').addEventListener('click', function () {
             const html = template.innerHTML.replaceAll('__I__', String(index++));

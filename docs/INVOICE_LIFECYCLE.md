@@ -161,6 +161,42 @@ i auditem, takže selhání (`InvalidInvoiceReference`) odvalí úplně všechno
 HTTP validace v `IssuedInvoiceRequest` zůstává jako první vrstva, ale
 doménová služba si kontrakt hlídá sama.
 
+### Přímé zadání fyzické osoby jako odběratele
+Formulář vydané faktury nabízí dvě volby: **Vybrat z kontaktů**
+(`recipient_mode=existing`, `contact_id` povinné) a **Zadat fyzickou osobu**
+(`recipient_mode=manual`, pole `person[name|street|city|zip|country|email]`,
+`contact_id` zakázané). Chybějící/prázdný `recipient_mode` = výběr z kontaktů
+(zpětná kompatibilita API i testů); neznámý režim je validační chyba.
+
+Fyzická osoba = **existující model Contact** (typ `customer`, běžný FK
+`contact_id`), žádná nová tabulka ani sloupec. Kontrakt:
+
+- **Whitelist vstupu.** Přijímá se jen jméno, ulice a číslo, město, PSČ,
+  země (2 velká písmena, normalizuje se „cz“ → „CZ“) a nepovinný e-mail.
+  `ico`, `dic`, `external_id`, `type`, `organization_id`, `id` i jakýkoli
+  jiný klíč v `person` končí chybou — nikdy se tiše nepoužije ani neignoruje.
+  Organizaci doplňuje controller z `CurrentOrganization`, typ je vždy
+  odběratel, IČO/DIČ/external_id zůstávají null. Ruční osoba a současně
+  vybraný kontakt (nebo pole osoby v režimu kontaktů) je rozpor → chyba.
+- **Jedna transakce.** Kontakt vzniká AŽ po úspěšné validaci, uvnitř téže
+  `DB::transaction` jako založení konceptu (`store`) resp. jako zamčené
+  `updateDraft()` (`update`). Výjimky (`InvalidStateTransition`,
+  `InvoiceNotFound`, `InvalidInvoiceReference`, `MoneyOverflow`) se chytají
+  AŽ VNĚ transakce, takže selhání odvalí kontakt i fakturu společně — žádný
+  osiřelý kontakt, původní řádky zůstávají netknuté. Lifecycle služba se
+  nemění; její whitelist a tenant kontrola referencí platí i pro nově
+  založený `contact_id`.
+- **Žádná deduplikace.** Jména se mohou opakovat; podle jména ani e-mailu
+  se nic nehledá ani nepřepisuje. Úprava jednoho konceptu nikdy nemění
+  sdílený kontakt. Koncept založený s ručně zadanou osobou se edituje
+  v režimu kontaktů s touto osobou jako vybraným kontaktem (žádné
+  duplikáty při běžné úpravě); nová osoba vzniká jen po explicitním
+  přepnutí na „Zadat fyzickou osobu“.
+- **Snapshot.** Vystavení používá stávající `customerSnapshot()`, takže
+  jméno a adresa osoby se zmrazí do `customer_snapshot` a PDF; IČO/DIČ jsou
+  null a doklad jejich popisky netiskne. Pozdější úprava kontaktu
+  historický doklad nemění.
+
 ### cancel(IssuedInvoice)
 Jen z issued a jen bez evidovaných plateb. cancelled_at = now, audit
 `invoice.cancelled`. Číslo faktury zůstává spotřebované (řada se nevrací) —

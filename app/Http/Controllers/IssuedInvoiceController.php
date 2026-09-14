@@ -36,8 +36,7 @@ class IssuedInvoiceController extends Controller
     public function __construct(
         private readonly IssuedInvoiceLifecycle $lifecycle,
         private readonly InvoiceTotalsCalculator $calculator,
-    ) {
-    }
+    ) {}
 
     public function index(Request $request): View
     {
@@ -75,11 +74,21 @@ class IssuedInvoiceController extends Controller
 
     public function store(IssuedInvoiceRequest $request): RedirectResponse
     {
-        try {
-            $invoice = DB::transaction(function () use ($request) {
-                $invoice = IssuedInvoice::create($this->headerData($request));
+        $header = $this->headerData($request);
+        $items = $this->itemRows($request->validated('items'), $request->vatRegime());
 
-                foreach ($this->itemRows($request->validated('items'), $request->vatRegime()) as $position => $item) {
+        try {
+            // Nový kontakt fyzické osoby vzniká ve STEJNÉ transakci jako
+            // koncept: selhání kdekoli (včetně MoneyOverflow při přepočtu)
+            // odvalí obojí — žádný osiřelý kontakt.
+            $invoice = DB::transaction(function () use ($request, $header, $items) {
+                if ($request->isManualRecipient()) {
+                    $header['contact_id'] = $this->createPersonContact($request)->id;
+                }
+
+                $invoice = IssuedInvoice::create($header);
+
+                foreach ($items as $position => $item) {
                     $invoice->items()->create($item + [
                         'organization_id' => $invoice->organization_id,
                         'position' => $position + 1,
@@ -124,16 +133,22 @@ class IssuedInvoiceController extends Controller
 
     public function update(IssuedInvoiceRequest $request, IssuedInvoice $invoice): RedirectResponse
     {
+        $header = $this->headerData($request);
+        $items = $this->itemRows($request->validated('items'), $request->vatRegime());
+
         // O editovatelnosti rozhoduje až zamčený řádek v lifecycle vrstvě.
+        // Vnější transakce obaluje založení kontaktu osoby i zamčenou úpravu
+        // konceptu; výjimky se chytají AŽ VNĚ, takže zastaralý stav, cizí
+        // reference i MoneyOverflow odvalí kontakt i fakturu společně.
         try {
-            $this->lifecycle->updateDraft(
-                $invoice,
-                $this->headerData($request),
-                $this->itemRows($request->validated('items'), $request->vatRegime()),
-            );
-        } catch (InvalidStateTransition|InvoiceNotFound|InvalidInvoiceReference $e) {
-            return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
-        } catch (MoneyOverflow $e) {
+            DB::transaction(function () use ($request, $invoice, $header, $items): void {
+                if ($request->isManualRecipient()) {
+                    $header['contact_id'] = $this->createPersonContact($request)->id;
+                }
+
+                $this->lifecycle->updateDraft($invoice, $header, $items);
+            });
+        } catch (InvalidStateTransition|InvoiceNotFound|InvalidInvoiceReference|MoneyOverflow $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
 
@@ -244,6 +259,25 @@ class IssuedInvoiceController extends Controller
             'internal_note' => $request->validated('internal_note'),
             'currency' => 'CZK',
         ];
+    }
+
+    /**
+     * Založí kontakt fyzické osoby zadané přímo ve formuláři. Volá se
+     * výhradně uvnitř transakce store()/update(). Organizace je vždy
+     * aktuální tenant, typ vždy odběratel; IČO/DIČ/external_id null.
+     * Jména se mohou opakovat — nic se nededuplikuje ani nepřepisuje.
+     */
+    private function createPersonContact(IssuedInvoiceRequest $request): Contact
+    {
+        return Contact::query()->create($request->personAttributes() + [
+            'organization_id' => app(CurrentOrganization::class)->getOrFail()->id,
+            'type' => ContactType::Customer,
+            'ico' => null,
+            'dic' => null,
+            'external_id' => null,
+            'phone' => null,
+            'note' => null,
+        ]);
     }
 
     /**

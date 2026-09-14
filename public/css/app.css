@@ -246,7 +246,16 @@ code { background: #eef1f5; padding: 0.1em 0.35em; border-radius: 4px; font-size
 
 .field.span-2 { grid-column: span 2; }
 
-.field label { font-size: 0.85rem; font-weight: 600; }
+/* atribut hidden musí přebít display: flex pole (přepínané části formuláře) */
+.field[hidden] { display: none; }
+
+.field label,
+.field-group legend { font-size: 0.85rem; font-weight: 600; }
+
+/* skupina přepínačů (např. způsob zadání odběratele) */
+.field-group { border: 0; padding: 0; margin: 0; min-width: 0; }
+
+.field-group legend { padding: 0; margin-bottom: 0.25rem; }
 
 .field input[type="text"],
 .field input[type="email"],

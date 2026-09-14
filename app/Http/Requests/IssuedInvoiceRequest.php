@@ -6,6 +6,7 @@ namespace App\Http\Requests;
 
 use App\Domain\Money\UsedGoodsMargin;
 use App\Domain\Tenancy\CurrentOrganization;
+use App\Enums\InvoiceRecipientMode;
 use App\Enums\VatRegime;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -13,6 +14,83 @@ use Illuminate\Validation\Validator;
 
 class IssuedInvoiceRequest extends FormRequest
 {
+    /**
+     * Pole fyzické osoby, která formulář přijímá. Cokoli jiného v `person`
+     * (ico, dic, type, organization_id, id, …) je chyba — nikdy se tiše
+     * nepoužije ani neignoruje.
+     */
+    public const array PERSON_FIELDS = ['name', 'street', 'city', 'zip', 'country', 'email'];
+
+    /**
+     * Klíče, které by z ručního zadání osoby mohly podstrčit firemní
+     * identitu nebo tenant/identifikátor; hlásí se jmenovitě.
+     */
+    private const array PERSON_FORBIDDEN_FIELDS = ['ico', 'dic', 'external_id', 'type', 'organization_id', 'id'];
+
+    /**
+     * Způsob zadání odběratele. Chybějící/prázdná hodnota = výběr z kontaktů
+     * (dosavadní chování); neplatná hodnota vrací null a validuje se
+     * pravidlem `recipient_mode` (pravidla pak platí pro režim kontaktů).
+     */
+    public function recipientMode(): ?InvoiceRecipientMode
+    {
+        $value = $this->input('recipient_mode');
+
+        if ($value === null || $value === '') {
+            return InvoiceRecipientMode::Existing;
+        }
+
+        return is_string($value) ? InvoiceRecipientMode::tryFrom($value) : null;
+    }
+
+    public function isManualRecipient(): bool
+    {
+        return $this->recipientMode() === InvoiceRecipientMode::Manual;
+    }
+
+    /**
+     * Validované atributy nové fyzické osoby — POUZE whitelist polí
+     * formuláře. Organizaci a typ doplňuje controller, IČO/DIČ/external_id
+     * zůstávají null.
+     *
+     * @return array{name: string, street: string, city: string, zip: string, country: string, email: ?string}
+     */
+    public function personAttributes(): array
+    {
+        $person = $this->validated('person');
+
+        if (! $this->isManualRecipient() || ! is_array($person)) {
+            throw new \LogicException('Atributy osoby jsou k dispozici jen v režimu ručního zadání odběratele.');
+        }
+
+        return [
+            'name' => (string) $person['name'],
+            'street' => (string) $person['street'],
+            'city' => (string) $person['city'],
+            'zip' => (string) $person['zip'],
+            'country' => (string) $person['country'],
+            'email' => isset($person['email']) && $person['email'] !== '' ? (string) $person['email'] : null,
+        ];
+    }
+
+    /**
+     * Kód země se normalizuje na velká písmena („cz“ → „CZ“); jiné tvary
+     * než řetězec se nechají spadnout na validaci (žádný TypeError).
+     */
+    protected function prepareForValidation(): void
+    {
+        $person = $this->input('person');
+
+        if (! $this->isManualRecipient() || ! is_array($person)) {
+            return;
+        }
+
+        if (is_string($person['country'] ?? null)) {
+            $person['country'] = strtoupper(trim($person['country']));
+            $this->merge(['person' => $person]);
+        }
+    }
+
     /**
      * Režim DPH z požadavku. Chybějící/neplatná hodnota = běžný režim
      * (dosavadní chování); samotná hodnota se validuje pravidlem `vat_regime`.
@@ -37,12 +115,18 @@ class IssuedInvoiceRequest extends FormRequest
     {
         $organizationId = app(CurrentOrganization::class)->id();
         $margin = $this->isUsedGoodsMargin();
+        $manual = $this->isManualRecipient();
 
         $rules = [
-            'contact_id' => [
-                'required', 'integer',
-                Rule::exists('contacts', 'id')->where('organization_id', $organizationId),
-            ],
+            // Chybějící = výběr z kontaktů (zpětná kompatibilita); neplatná hodnota = chyba.
+            'recipient_mode' => ['nullable', 'string', Rule::enum(InvoiceRecipientMode::class)],
+            'contact_id' => $manual
+                // Ruční zadání osoby a současně vybraný kontakt si odporují.
+                ? ['prohibited']
+                : [
+                    'required', 'integer',
+                    Rule::exists('contacts', 'id')->where('organization_id', $organizationId),
+                ],
             'project_id' => [
                 'nullable', 'integer',
                 Rule::exists('projects', 'id')->where('organization_id', $organizationId),
@@ -87,17 +171,55 @@ class IssuedInvoiceRequest extends FormRequest
             $rules['items.*.acquisition_unit_price'] = ['prohibited'];
         }
 
+        if ($manual) {
+            // Fyzická osoba: jméno a adresa povinné, žádné IČO/DIČ. Země je
+            // ISO kód (normalizuje se na velká písmena v prepareForValidation).
+            $rules['person'] = ['required', 'array'];
+            $rules['person.name'] = ['required', 'string', 'max:255'];
+            $rules['person.street'] = ['required', 'string', 'max:255'];
+            $rules['person.city'] = ['required', 'string', 'max:255'];
+            $rules['person.zip'] = ['required', 'string', 'max:20'];
+            $rules['person.country'] = ['required', 'string', 'size:2', 'regex:/^[A-Z]{2}$/'];
+            $rules['person.email'] = ['nullable', 'string', 'email', 'max:255'];
+
+            foreach (self::PERSON_FORBIDDEN_FIELDS as $field) {
+                $rules["person.{$field}"] = ['prohibited'];
+            }
+        } else {
+            // Režim kontaktů: pole osoby nesmí nést hodnotu (prázdná pole
+            // formuláře bez JS projdou — jsou převedena na null).
+            $rules['person'] = ['nullable', 'array'];
+            $rules['person.*'] = ['prohibited'];
+        }
+
         return $rules;
     }
 
     /**
-     * Zvláštní režim smí zvolit jen organizace nastavená jako plátce DPH.
+     * Zvláštní režim smí zvolit jen organizace nastavená jako plátce DPH;
+     * v ručním zadání osoby nesmí být žádné jiné než whitelistované klíče.
      *
      * @return list<callable>
      */
     public function after(): array
     {
         return [
+            function (Validator $validator): void {
+                $person = $this->input('person');
+
+                if (! $this->isManualRecipient() || ! is_array($person)) {
+                    return;
+                }
+
+                $unexpected = array_diff(array_keys($person), self::PERSON_FIELDS);
+
+                if ($unexpected !== []) {
+                    $validator->errors()->add(
+                        'person',
+                        'Nepovolená pole fyzické osoby: '.implode(', ', array_map('strval', $unexpected)).'.',
+                    );
+                }
+            },
             function (Validator $validator): void {
                 if (! $this->isUsedGoodsMargin()) {
                     return;
@@ -131,6 +253,16 @@ class IssuedInvoiceRequest extends FormRequest
             'items.*.acquisition_unit_price.prohibited' => 'Pořizovací cena se zadává jen ve zvláštním režimu - použité zboží.',
             'items.*.vat_rate.prohibited' => 'Ve zvláštním režimu - použité zboží se sazba DPH u položek nezadává (DPH se počítá z přirážky).',
             'vat_regime.Illuminate\Validation\Rules\Enum' => 'Neznámý režim DPH.',
+            'recipient_mode.Illuminate\Validation\Rules\Enum' => 'Neznámý způsob zadání odběratele.',
+            'recipient_mode.string' => 'Neznámý způsob zadání odběratele.',
+            'contact_id.prohibited' => 'Při ručním zadání fyzické osoby se odběratel z kontaktů nevybírá.',
+            'person.required' => 'Zadejte údaje fyzické osoby.',
+            'person.array' => 'Údaje fyzické osoby mají neplatný tvar.',
+            'person.*.prohibited' => 'Údaje fyzické osoby se zadávají jen při volbě „Zadat fyzickou osobu“.',
+            'person.ico.prohibited' => 'U fyzické osoby se IČO nezadává.',
+            'person.dic.prohibited' => 'U fyzické osoby se DIČ nezadává.',
+            'person.country.size' => 'Země musí být dvoupísmenný kód (např. CZ).',
+            'person.country.regex' => 'Země musí být dvoupísmenný kód (např. CZ).',
             'margin_vat_rate.required' => 'Zvolte interní sazbu DPH z přirážky.',
             'margin_vat_rate.in' => 'Nepodporovaná sazba DPH z přirážky (podporováno: '.implode(', ', UsedGoodsMargin::rateOptions()).' %).',
             'margin_vat_rate.prohibited' => 'Sazba DPH z přirážky se zadává jen ve zvláštním režimu - použité zboží.',
@@ -140,7 +272,11 @@ class IssuedInvoiceRequest extends FormRequest
     public function attributes(): array
     {
         return [
+            'recipient_mode' => 'způsob zadání odběratele',
             'contact_id' => 'odběratel', 'project_id' => 'projekt',
+            'person' => 'fyzická osoba', 'person.name' => 'jméno a příjmení',
+            'person.street' => 'ulice a číslo', 'person.city' => 'město', 'person.zip' => 'PSČ',
+            'person.country' => 'země', 'person.email' => 'e-mail',
             'bank_account_id' => 'bankovní účet', 'number_series_id' => 'číselná řada',
             'issue_date' => 'datum vystavení', 'due_date' => 'datum splatnosti',
             'tax_date' => 'DUZP', 'variable_symbol' => 'variabilní symbol',
