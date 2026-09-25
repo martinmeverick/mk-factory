@@ -1,0 +1,144 @@
+name: MK147 isolated runtime acceptance
+on:
+  push:
+    branches: [codex/ci-mk147-acceptance]
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:10.11.14
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+          MARIADB_DATABASE: mk147_synthetic
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      APP_URL: http://localhost
+      DB_CONNECTION: sqlite
+      DB_DATABASE: ':memory:'
+      DB_URL: ''
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f1a86e5fe69b1121b11edcd4a0120832ca94a235
+          persist-credentials: false
+      - uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45
+        with:
+          php-version: '8.4'
+          extensions: bcmath, gd, pdo_mysql, pdo_sqlite, mbstring, xml, dom, fileinfo
+          coverage: none
+          tools: composer:v2
+      - name: Identity and locked dependencies
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          test "$(git rev-parse HEAD)" = f1a86e5fe69b1121b11edcd4a0120832ca94a235
+          test ! -f .env
+          { echo "workflow_sha=$WORKFLOW_SHA"; git show -s --format='tested_sha=%H%ntested_tree=%T'; id; uname -a; cat /etc/os-release; php -v; php -m; composer --version; } > evidence/identity.log
+          composer install --no-interaction --no-scripts --no-plugins 2>&1 | tee evidence/composer.log
+          php artisan package:discover 2>&1 | tee evidence/package-discovery.log
+          git diff --exit-code composer.lock
+      - name: Guarded SQLite full suite on PHP 8.4
+        run: |
+          set -euo pipefail
+          php vendor/bin/phpunit --log-junit evidence/sqlite-junit.xml 2>&1 | tee evidence/sqlite.log
+          python3 - <<'PY'
+          import xml.etree.ElementTree as E
+          root = E.parse('evidence/sqlite-junit.xml').getroot()
+          cases = root.findall('.//testcase')
+          assert len(cases) == 527, len(cases)
+          assert not root.findall('.//failure') and not root.findall('.//error') and not root.findall('.//skipped')
+          print('527 PASS / 0 FAIL / 0 SKIP')
+          PY
+      - name: MariaDB exact version baseline 20 to target 22 migration acceptance
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_DATABASE: mk147_synthetic
+          DB_USERNAME: root
+          DB_PASSWORD: synthetic-ci-only
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/mk147-migration.php" <<'PHP'
+          <?php
+          require getcwd().'/vendor/autoload.php';
+          $app = require getcwd().'/bootstrap/app.php';
+          $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+          use Illuminate\Support\Facades\DB;
+          use Illuminate\Support\Facades\Artisan;
+          function check(bool $ok, string $label): void {
+              if (!$ok) throw new RuntimeException($label);
+              echo "PASS: $label\n";
+          }
+          check(config('database.default') === 'mysql' && config('database.connections.mysql.host') === '127.0.0.1' && config('database.connections.mysql.database') === 'mk147_synthetic', 'disposable endpoint guard');
+          $version = DB::selectOne('SELECT VERSION() AS version')->version;
+          check(str_starts_with($version, '10.11.14-MariaDB'), 'exact MariaDB 10.11.14: '.$version);
+          check(count(DB::select('SHOW TABLES')) === 0, 'initial disposable schema empty');
+          $paths = glob(getcwd().'/database/migrations/*.php'); sort($paths);
+          check(count($paths) === 22, 'target migration inventory 22');
+          check(basename($paths[20]) === '2026_09_25_000001_add_organization_profile_name.php' && basename($paths[21]) === '2026_09_25_000002_add_invoice_discount.php', 'only intended two pending migrations');
+          check(Artisan::call('migrate', ['--path'=>array_slice($paths, 0, 20), '--realpath'=>true, '--force'=>true]) === 0, 'baseline migrations apply');
+          echo Artisan::output();
+          check(DB::table('migrations')->count() === 20, 'baseline migration count 20');
+          $org = DB::table('organizations')->insertGetId(['name'=>'SYNTHETIC CI issuer', 'ico'=>'CI-ONLY']);
+          $contact = DB::table('contacts')->insertGetId(['organization_id'=>$org, 'type'=>'customer', 'name'=>'SYNTHETIC CI customer']);
+          foreach (['draft','issued','paid'] as $index=>$status) {
+              $invoice = DB::table('issued_invoices')->insertGetId(['organization_id'=>$org, 'contact_id'=>$contact, 'status'=>$status, 'invoice_number'=>'CI-'.$index, 'issue_date'=>'2026-01-01', 'subtotal_minor'=>10000, 'vat_total_minor'=>2100, 'total_minor'=>12100, 'paid_amount_minor'=>$status==='paid'?12100:0, 'supplier_snapshot'=>json_encode(['name'=>'SYNTHETIC snapshot']), 'customer_snapshot'=>json_encode(['name'=>'SYNTHETIC customer'])]);
+              DB::table('issued_invoice_items')->insert(['organization_id'=>$org, 'issued_invoice_id'=>$invoice, 'position'=>1, 'description'=>'SYNTHETIC line', 'quantity'=>'1.000', 'unit_price_minor'=>10000, 'vat_rate'=>'21.00', 'line_subtotal_minor'=>10000, 'line_vat_minor'=>2100, 'line_total_minor'=>12100]);
+          }
+          $tables = array_map(fn($r)=>array_values((array)$r)[0], DB::select('SHOW TABLES'));
+          $before = []; $columns = [];
+          foreach ($tables as $table) {
+              if ($table === 'migrations') continue;
+              $columns[$table] = DB::select('SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION', [$table]);
+              $before[$table] = DB::table($table)->orderBy($columns[$table][0]->COLUMN_NAME)->get()->toArray();
+          }
+          $migrationRows = DB::table('migrations')->orderBy('id')->get()->toArray();
+          check(Artisan::call('migrate', ['--force'=>true]) === 0, 'two target migrations apply');
+          echo Artisan::output();
+          check(DB::table('migrations')->count() === 22, 'target migration count 22');
+          check(DB::table('migrations')->orderBy('id')->limit(20)->get()->toArray() == $migrationRows, 'baseline migration history untouched');
+          foreach ($before as $table=>$rows) {
+              $names = array_map(fn($c)=>$c->COLUMN_NAME, $columns[$table]);
+              check(DB::table($table)->select($names)->orderBy($names[0])->get()->toArray() == $rows, "$table all legacy row values unchanged");
+              $afterColumns = DB::select('SELECT COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? ORDER BY ORDINAL_POSITION', [$table]);
+              $legacy = array_values(array_filter($afterColumns, fn($c)=>in_array($c->COLUMN_NAME, $names, true)));
+              check($legacy == $columns[$table], "$table legacy column definitions unchanged");
+          }
+          check(DB::table('organizations')->whereNotNull('profile_name')->count() === 0, 'legacy profile_name NULL');
+          check(DB::table('issued_invoices')->where('discount_type','none')->where('discount_value','0.00')->where('discount_total_minor',0)->count() === 3, 'legacy draft issued paid discount defaults unchanged');
+          check(DB::table('issued_invoice_items')->where('line_discount_minor',0)->count() === 3, 'legacy item discount defaults zero');
+          $newOrg = DB::table('organizations')->insertGetId(['name'=>'SYNTHETIC new issuer']);
+          check(DB::table('organizations')->find($newOrg)->profile_name === null, 'new organization default NULL');
+          $newInvoice = DB::table('issued_invoices')->insertGetId(['organization_id'=>$org, 'contact_id'=>$contact, 'issue_date'=>'2026-01-02']);
+          $new = DB::table('issued_invoices')->find($newInvoice);
+          check($new->discount_type === 'none' && (string)$new->discount_value === '0.00' && (int)$new->discount_total_minor === 0, 'new invoice defaults');
+          $item = DB::table('issued_invoice_items')->insertGetId(['organization_id'=>$org, 'issued_invoice_id'=>$newInvoice, 'position'=>1, 'description'=>'SYNTHETIC new line', 'quantity'=>'1.000', 'unit_price_minor'=>123]);
+          check((int)DB::table('issued_invoice_items')->find($item)->line_discount_minor === 0, 'new item default zero');
+          echo "MARIA_DB_MIGRATION_ACCEPTANCE_PASS\n";
+          PHP
+          cp "$RUNNER_TEMP/mk147-migration.php" evidence/migration-probe.php
+          php "$RUNNER_TEMP/mk147-migration.php" 2>&1 | tee evidence/mariadb-migration.log
+      - name: Upload evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: mk147-runtime-acceptance
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 14
