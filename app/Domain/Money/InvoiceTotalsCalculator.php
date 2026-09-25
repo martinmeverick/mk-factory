@@ -111,11 +111,28 @@ final class InvoiceTotalsCalculator
         $marginVat = Money::zero($currency);
         $marginBase = Money::zero($currency);
 
-        $items = $invoice->items()->get();
-
+        $items = $invoice->items()->orderBy('id')->get();
+        $originalTotals = [];
         foreach ($items as $item) {
+            $price = Money::fromMinor((int) $item->unit_price_minor, $currency);
+            $originalTotals[] = $isMargin
+                ? $price->multiplyBy((string) $item->quantity)->getMinor()
+                : $this->calculateLine((string) $item->quantity, $price, $item->vat_rate === null ? null : (string) $item->vat_rate)['total']->getMinor();
+        }
+        // Validate the entire discount before writing any line. The surrounding
+        // draft/issue transaction also makes the recalculation atomic.
+        $discounts = (new InvoiceDiscount)->allocate(
+            $originalTotals,
+            (string) ($invoice->discount_type ?? 'none'),
+            (string) ($invoice->discount_value ?? '0'),
+        );
+        $discountTotal = Money::zero($currency);
+
+        foreach ($items as $index => $item) {
             $quantity = (string) $item->quantity;
             $unitPrice = Money::fromMinor((int) $item->unit_price_minor, $currency);
+            $discount = Money::fromMinor($discounts[$index], $currency);
+            $discountTotal = $discountTotal->plus($discount);
 
             if ($isMargin) {
                 if ($item->acquisition_unit_price_minor === null) {
@@ -130,6 +147,14 @@ final class InvoiceTotalsCalculator
                     Money::fromMinor((int) $item->acquisition_unit_price_minor, $currency),
                     (string) $marginRate,
                 );
+                if ($discounts[$index] > 0) {
+                    $line['total'] = $line['total']->minus($discount);
+                    $line['subtotal'] = $line['total'];
+                    $gross = $line['total']->minus($line['acquisition']);
+                    $line['margin_gross'] = $gross->isNegative() ? Money::zero($currency) : $gross;
+                    $line['margin_vat'] = $line['margin_gross']->includedVatAtRate((string) $marginRate);
+                    $line['margin_base'] = $line['margin_gross']->minus($line['margin_vat']);
+                }
 
                 $item->forceFill([
                     // Ve zvláštním režimu řádek nenese běžnou sazbu DPH.
@@ -137,6 +162,7 @@ final class InvoiceTotalsCalculator
                     'line_subtotal_minor' => $line['subtotal']->getMinor(),
                     'line_vat_minor' => 0,
                     'line_total_minor' => $line['total']->getMinor(),
+                    'line_discount_minor' => $discounts[$index],
                     'line_acquisition_minor' => $line['acquisition']->getMinor(),
                     'line_margin_gross_minor' => $line['margin_gross']->getMinor(),
                     'line_margin_vat_minor' => $line['margin_vat']->getMinor(),
@@ -153,11 +179,18 @@ final class InvoiceTotalsCalculator
                     $unitPrice,
                     $item->vat_rate === null ? null : (string) $item->vat_rate,
                 );
+                if ($discounts[$index] > 0) {
+                    $line['total'] = $line['total']->minus($discount);
+                    $line['vat'] = $item->vat_rate === null ? Money::zero($currency)
+                        : $line['total']->includedVatAtRate((string) $item->vat_rate);
+                    $line['subtotal'] = $line['total']->minus($line['vat']);
+                }
 
                 $item->forceFill([
                     'line_subtotal_minor' => $line['subtotal']->getMinor(),
                     'line_vat_minor' => $line['vat']->getMinor(),
                     'line_total_minor' => $line['total']->getMinor(),
+                    'line_discount_minor' => $discounts[$index],
                     'line_acquisition_minor' => 0,
                     'line_margin_gross_minor' => 0,
                     'line_margin_vat_minor' => 0,
@@ -174,6 +207,7 @@ final class InvoiceTotalsCalculator
             'subtotal_minor' => $subtotal->getMinor(),
             'vat_total_minor' => $vatTotal->getMinor(),
             'total_minor' => $total->getMinor(),
+            'discount_total_minor' => $discountTotal->getMinor(),
             'margin_acquisition_total_minor' => $acquisitionTotal->getMinor(),
             'margin_gross_minor' => $marginGross->getMinor(),
             'margin_vat_minor' => $marginVat->getMinor(),

@@ -79,6 +79,9 @@ class IssuedInvoiceRequest extends FormRequest
      */
     protected function prepareForValidation(): void
     {
+        if (is_string($this->input('discount_value'))) {
+            $this->merge(['discount_value' => str_replace(',', '.', trim($this->input('discount_value')))]);
+        }
         $person = $this->input('person');
 
         if (! $this->isManualRecipient() || ! is_array($person)) {
@@ -118,6 +121,8 @@ class IssuedInvoiceRequest extends FormRequest
         $manual = $this->isManualRecipient();
 
         $rules = [
+            'discount_type' => ['nullable', 'string', Rule::in(['none', 'percent', 'fixed'])],
+            'discount_value' => ['nullable', 'required_if:discount_type,percent,fixed', 'regex:/^\d{1,17}(\.\d{1,2})?$/D'],
             // Chybějící = výběr z kontaktů (zpětná kompatibilita); neplatná hodnota = chyba.
             'recipient_mode' => ['nullable', 'string', Rule::enum(InvoiceRecipientMode::class)],
             'contact_id' => $manual
@@ -204,6 +209,17 @@ class IssuedInvoiceRequest extends FormRequest
     public function after(): array
     {
         return [
+            function (Validator $validator): void {
+                if ($validator->errors()->has('discount_value') || $validator->errors()->has('discount_type')) {
+                    return;
+                }
+                $type = $this->input('discount_type') ?: 'none';
+                $value = (string) ($this->input('discount_value') ?? '0');
+                if (($type === 'percent' && bccomp($value, '100', 2) > 0)
+                    || ($type === 'none' && bccomp($value, '0', 2) !== 0)) {
+                    $validator->errors()->add('discount_value', 'Zadejte slevu od 0 do 100 %, nebo nulovou hodnotu pro volbu Bez slevy.');
+                }
+            },
             function (Validator $validator): void {
                 $person = $this->input('person');
 

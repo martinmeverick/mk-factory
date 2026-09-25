@@ -19,7 +19,10 @@
                     <form method="post" action="{{ route('organizations.choose', $organization) }}">
                         @csrf
                         <button type="submit" class="org-choice">
-                            <span class="org-name">{{ $organization->name }}</span>
+                            <span class="org-name">{{ $organization->profile_name ?: $organization->name }}</span>
+                            @if ($organization->profile_name)
+                                <span class="muted">{{ $organization->name }}</span>
+                            @endif
                             @if ($organization->ico)
                                 <span class="muted">IČO {{ $organization->ico }}</span>
                             @endif
@@ -30,6 +33,9 @@
         </ul>
     @endif
 
+    @if ($canCreate)
+        <a class="btn btn-primary" href="{{ route('organizations.create') }}">Přidat fakturační profil</a>
+    @endif
     <form method="post" action="{{ route('logout') }}" class="mt">
         @csrf
         <button type="submit" class="link-button">Odhlásit se</button>

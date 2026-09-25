@@ -20,11 +20,11 @@ use DateTimeImmutable;
 final readonly class InvoicePdfData
 {
     /**
-     * @param array{name: ?string, ico: ?string, dic: ?string, street: ?string, city: ?string, zip: ?string, country: ?string, email: ?string, phone: ?string, website: ?string} $supplier
-     * @param array{name: ?string, ico: ?string, dic: ?string, street: ?string, city: ?string, zip: ?string, country: ?string} $customer
-     * @param array{account_number: ?string, bank_code: ?string, iban: ?string, bic: ?string}|null $bankAccount
-     * @param list<InvoicePdfLine> $items
-     * @param list<array{rate: string, base: Money, vat: Money}> $vatBreakdown
+     * @param  array{name: ?string, ico: ?string, dic: ?string, street: ?string, city: ?string, zip: ?string, country: ?string, email: ?string, phone: ?string, website: ?string}  $supplier
+     * @param  array{name: ?string, ico: ?string, dic: ?string, street: ?string, city: ?string, zip: ?string, country: ?string}  $customer
+     * @param  array{account_number: ?string, bank_code: ?string, iban: ?string, bic: ?string}|null  $bankAccount
+     * @param  list<InvoicePdfLine>  $items
+     * @param  list<array{rate: string, base: Money, vat: Money}>  $vatBreakdown
      */
     public function __construct(
         public array $supplier,
@@ -50,7 +50,31 @@ final readonly class InvoicePdfData
         // Režim DPH dokladu; u zvláštního režimu je vatPayer = true (dodavatel
         // je plátce), ale DPH se nevyčísluje a nezobrazuje se rekapitulace.
         public VatRegime $vatRegime = VatRegime::Standard,
-    ) {
+        public string $discountType = 'none',
+        public string $discountValue = '0',
+        public ?Money $discountTotal = null,
+    ) {}
+
+    public function hasDiscount(): bool
+    {
+        return $this->discountTotal?->isPositive() ?? false;
+    }
+
+    public function originalTotal(): Money
+    {
+        return $this->discountTotal === null ? $this->total : $this->total->plus($this->discountTotal);
+    }
+
+    public function discountLabel(): string
+    {
+        if ($this->discountType !== 'percent') {
+            return 'Sleva';
+        }
+
+        $value = str_replace(',', '.', $this->discountValue);
+        $value = str_contains($value, '.') ? rtrim(rtrim($value, '0'), '.') : $value;
+
+        return 'Sleva '.str_replace('.', ',', $value).' %';
     }
 
     public function isDraft(): bool

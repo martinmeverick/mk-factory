@@ -24,8 +24,7 @@ final class InvoicePdfDataFactory
 {
     public function __construct(
         private readonly InvoiceLogoSnapshotStore $logoSnapshots,
-    ) {
-    }
+    ) {}
 
     public function fromInvoice(IssuedInvoice $invoice): InvoicePdfData
     {
@@ -101,6 +100,7 @@ final class InvoicePdfDataFactory
                 lineSubtotal: Money::fromMinor((int) $item->line_subtotal_minor, $invoice->currency),
                 lineVat: Money::fromMinor((int) $item->line_vat_minor, $invoice->currency),
                 lineTotal: Money::fromMinor((int) $item->line_total_minor, $invoice->currency),
+                lineDiscount: Money::fromMinor((int) ($item->line_discount_minor ?? 0), $invoice->currency),
             ))->all(),
             subtotal: Money::fromMinor((int) $invoice->subtotal_minor, $invoice->currency),
             vatBreakdown: $this->vatBreakdown($invoice),
@@ -114,6 +114,9 @@ final class InvoicePdfDataFactory
             paidAmount: Money::fromMinor((int) $invoice->paid_amount_minor, $invoice->currency),
             remainingAmount: $this->remainingAmount($invoice),
             vatRegime: $vatRegime,
+            discountType: (string) ($invoice->discount_type ?? 'none'),
+            discountValue: (string) ($invoice->discount_value ?? '0'),
+            discountTotal: Money::fromMinor((int) ($invoice->discount_total_minor ?? 0), $invoice->currency),
         );
     }
 

@@ -29,6 +29,8 @@ Route::middleware('auth')->group(function () {
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
     Route::get('/organizace', [OrganizationSelectController::class, 'index'])->name('organizations.select');
+    Route::get('/organizace/nova', [OrganizationSelectController::class, 'create'])->name('organizations.create');
+    Route::post('/organizace', [OrganizationSelectController::class, 'store'])->name('organizations.store');
     Route::post('/organizace/{organization}', [OrganizationSelectController::class, 'select'])->name('organizations.choose');
 });
 

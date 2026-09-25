@@ -66,6 +66,8 @@ final class IssuedInvoiceLifecycle
         'note',
         'internal_note',
         'currency',
+        'discount_type',
+        'discount_value',
         // Režim DPH a interní sazba zvláštního režimu - použité zboží jsou
         // volbou uživatele v konceptu; odvozené margin_*_minor součty sem
         // NEPATŘÍ — počítá je výhradně kalkulačka.

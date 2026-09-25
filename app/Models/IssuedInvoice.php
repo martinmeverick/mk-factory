@@ -7,6 +7,7 @@ use App\Domain\Money\Money;
 use App\Domain\Tenancy\BelongsToOrganization;
 use App\Enums\IssuedInvoiceStatus;
 use App\Enums\VatRegime;
+use Database\Factories\IssuedInvoiceFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -17,7 +18,7 @@ use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class IssuedInvoice extends Model
 {
-    /** @use HasFactory<\Database\Factories\IssuedInvoiceFactory> */
+    /** @use HasFactory<IssuedInvoiceFactory> */
     use BelongsToOrganization, HasFactory;
 
     /**
@@ -36,6 +37,9 @@ class IssuedInvoice extends Model
         'subtotal_minor',
         'vat_total_minor',
         'total_minor',
+        'discount_type',
+        'discount_value',
+        'discount_total_minor',
         // Režim DPH a interní evidence přirážky (zvláštní režim - použité zboží)
         // jsou po vystavení součástí dokladu / daňové evidence.
         'vat_regime',
@@ -110,6 +114,9 @@ class IssuedInvoice extends Model
         'vat_total_minor' => 0,
         'total_minor' => 0,
         'paid_amount_minor' => 0,
+        'discount_type' => 'none',
+        'discount_value' => '0.00',
+        'discount_total_minor' => 0,
         'vat_regime' => 'standard',
         'margin_vat_rate' => null,
         'margin_acquisition_total_minor' => 0,
@@ -132,6 +139,8 @@ class IssuedInvoice extends Model
             'vat_total_minor' => 'integer',
             'total_minor' => 'integer',
             'paid_amount_minor' => 'integer',
+            'discount_value' => 'decimal:2',
+            'discount_total_minor' => 'integer',
             'vat_regime' => VatRegime::class,
             'margin_vat_rate' => 'decimal:2',
             'margin_acquisition_total_minor' => 'integer',

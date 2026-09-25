@@ -9,6 +9,7 @@ use App\Domain\Invoicing\InvalidStateTransition;
 use App\Domain\Invoicing\InvoiceNotFound;
 use App\Domain\Invoicing\InvoiceNotIssuable;
 use App\Domain\Invoicing\IssuedInvoiceLifecycle;
+use App\Domain\Money\InvalidInvoiceDiscount;
 use App\Domain\Money\InvoiceTotalsCalculator;
 use App\Domain\Money\Money;
 use App\Domain\Money\MoneyOverflow;
@@ -99,6 +100,8 @@ class IssuedInvoiceController extends Controller
 
                 return $invoice;
             });
+        } catch (InvalidInvoiceDiscount $e) {
+            return back()->withInput()->withErrors(['discount_value' => $e->getMessage()]);
         } catch (MoneyOverflow $e) {
             return back()->withInput()->withErrors(['items' => $e->getMessage()]);
         }
@@ -148,6 +151,8 @@ class IssuedInvoiceController extends Controller
 
                 $this->lifecycle->updateDraft($invoice, $header, $items);
             });
+        } catch (InvalidInvoiceDiscount $e) {
+            return back()->withInput()->withErrors(['discount_value' => $e->getMessage()]);
         } catch (InvalidStateTransition|InvoiceNotFound|InvalidInvoiceReference|MoneyOverflow $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         }
@@ -171,7 +176,7 @@ class IssuedInvoiceController extends Controller
     {
         try {
             $this->lifecycle->issue($invoice, CarbonImmutable::parse($invoice->issue_date));
-        } catch (InvoiceNotIssuable|InvalidStateTransition|InvoiceNotFound|MoneyOverflow $e) {
+        } catch (InvoiceNotIssuable|InvalidStateTransition|InvoiceNotFound|MoneyOverflow|InvalidInvoiceDiscount $e) {
             return redirect()->route('invoices.show', $invoice)->with('error', $e->getMessage());
         } catch (UniqueConstraintViolationException) {
             // Číslo z řady už existuje (typicky po ručním snížení „dalšího čísla“).
@@ -244,6 +249,8 @@ class IssuedInvoiceController extends Controller
 
         return [
             'vat_regime' => $regime,
+            'discount_type' => $request->validated('discount_type') ?: 'none',
+            'discount_value' => $request->validated('discount_value') ?? '0.00',
             'margin_vat_rate' => $regime === VatRegime::UsedGoodsMargin
                 ? UsedGoodsMargin::normalizeRate((string) $request->validated('margin_vat_rate'))
                 : null,

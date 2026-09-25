@@ -8,6 +8,13 @@
     // evidence přirážky se zobrazuje v samostatném panelu (netiskne se).
     $isMargin = $invoice->isUsedGoodsMargin();
     $withVat = ! $isMargin && $invoice->items->contains(fn ($item) => $item->vat_rate !== null);
+    $discountMinor = (int) ($invoice->discount_total_minor ?? 0);
+    $discountLabel = 'Sleva';
+    if (($invoice->discount_type ?? 'none') === 'percent') {
+        $discountValue = (string) $invoice->discount_value;
+        $discountValue = str_contains($discountValue, '.') ? rtrim(rtrim($discountValue, '0'), '.') : $discountValue;
+        $discountLabel .= ' '.str_replace('.', ',', $discountValue).' %';
+    }
 @endphp
 
 @section('content')
@@ -159,6 +166,9 @@
 
     <section class="panel">
         <h2>Položky</h2>
+        @if ($discountMinor > 0)
+            <p class="muted">Ceny položek jsou uvedeny před slevou. Sleva za celý doklad je odečtena v souhrnu.</p>
+        @endif
         @if ($isMargin)
             <p class="muted">Zvláštní režim - použité zboží: cena za MJ je konečná prodejní cena včetně DPH, DPH se na dokladu nevyčísluje.</p>
         @endif
@@ -179,6 +189,13 @@
             </thead>
             <tbody>
             @foreach ($invoice->items->sortBy('position') as $item)
+                @php
+                    $originalTotal = \App\Domain\Money\Money::fromMinor((int) $item->line_total_minor, $invoice->currency)
+                        ->plus(\App\Domain\Money\Money::fromMinor((int) ($item->line_discount_minor ?? 0), $invoice->currency));
+                    $originalSubtotal = (int) ($item->line_discount_minor ?? 0) > 0
+                        ? (new \App\Domain\Money\InvoiceTotalsCalculator)->calculateLine((string) $item->quantity, \App\Domain\Money\Money::fromMinor((int) $item->unit_price_minor, $invoice->currency), $item->vat_rate !== null ? (string) $item->vat_rate : null)['subtotal']
+                        : \App\Domain\Money\Money::fromMinor((int) $item->line_subtotal_minor, $invoice->currency);
+                @endphp
                 <tr>
                     <td>{{ $item->description }}</td>
                     <td class="num">{{ Format::quantity($item->quantity) }}</td>
@@ -186,17 +203,27 @@
                     <td class="num">{{ Format::money($item->unit_price_minor, $invoice->currency) }}</td>
                     @if ($withVat)
                         <td class="num">{{ Format::vatRate($item->vat_rate) }}</td>
-                        <td class="num">{{ Format::money($item->line_subtotal_minor, $invoice->currency) }}</td>
-                        <td class="num">{{ Format::money($item->line_vat_minor, $invoice->currency) }}</td>
+                        <td class="num">{{ $originalSubtotal->formatCzech() }}</td>
+                        <td class="num">{{ $originalTotal->minus($originalSubtotal)->formatCzech() }}</td>
                     @endif
-                    <td class="num">{{ Format::money($item->line_total_minor, $invoice->currency) }}</td>
+                    <td class="num">{{ $originalTotal->formatCzech() }}</td>
                 </tr>
             @endforeach
             </tbody>
             <tfoot>
+            @if ($discountMinor > 0)
+                <tr>
+                    <td colspan="{{ $withVat ? 7 : 4 }}" class="num">Celkem před slevou</td>
+                    <td class="num">{{ \App\Domain\Money\Money::fromMinor((int) $invoice->total_minor, $invoice->currency)->plus(\App\Domain\Money\Money::fromMinor($discountMinor, $invoice->currency))->formatCzech() }}</td>
+                </tr>
+                <tr>
+                    <td colspan="{{ $withVat ? 7 : 4 }}" class="num">{{ $discountLabel }}</td>
+                    <td class="num">−{{ Format::money($discountMinor, $invoice->currency) }}</td>
+                </tr>
+            @endif
             @if ($withVat)
                 <tr>
-                    <td colspan="5"></td>
+                    <td colspan="5" class="num">{{ $discountMinor > 0 ? 'Celkem po slevě' : 'Celkem' }}</td>
                     <td class="num"><strong>{{ Format::money($invoice->subtotal_minor, $invoice->currency) }}</strong></td>
                     <td class="num"><strong>{{ Format::money($invoice->vat_total_minor, $invoice->currency) }}</strong></td>
                     <td class="num"><strong>{{ Format::money($invoice->total_minor, $invoice->currency) }}</strong></td>
@@ -204,7 +231,7 @@
             @else
                 <tr>
                     <td colspan="3"></td>
-                    <td class="num muted">Celkem</td>
+                    <td class="num muted">{{ $discountMinor > 0 ? 'Celkem po slevě' : 'Celkem' }}</td>
                     <td class="num"><strong>{{ Format::money($invoice->total_minor, $invoice->currency) }}</strong></td>
                 </tr>
             @endif

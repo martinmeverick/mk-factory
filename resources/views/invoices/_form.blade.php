@@ -46,6 +46,10 @@
         ])->all();
     }
     $oldItems = $oldItems ?: [['description' => '', 'quantity' => '1', 'unit' => 'ks', 'unit_price' => '', 'vat_rate' => '21', 'acquisition_unit_price' => '']];
+    $discountType = old('discount_type', $invoice?->discount_type ?? 'none');
+    $discountType = is_string($discountType) && in_array($discountType, ['none', 'percent', 'fixed'], true) ? $discountType : 'none';
+    $discountValue = old('discount_value', $invoice?->discount_value ?? '0');
+    $discountValue = is_scalar($discountValue) ? (string) $discountValue : '';
 @endphp
 
 @if ($marginDraftOfNonPayer)
@@ -332,6 +336,30 @@
 
 <button type="button" class="btn" id="add-item">+ Přidat položku</button>
 
+<h2 class="section-title">Sleva na celou fakturu</h2>
+<div class="form-grid">
+    <div class="field">
+        <label for="discount_type">Typ slevy</label>
+        <select id="discount_type" name="discount_type" aria-describedby="discount_hint">
+            <option value="none" @selected($discountType === 'none')>Bez slevy</option>
+            <option value="percent" @selected($discountType === 'percent')>Procentní sleva</option>
+            <option value="fixed" @selected($discountType === 'fixed')>Pevná částka (Kč)</option>
+        </select>
+        @error('discount_type')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+    <div class="field">
+        <label for="discount_value" id="discount_value_label">{{ $discountType === 'percent' ? 'Sleva (%)' : 'Sleva (Kč)' }}</label>
+        <input type="number" id="discount_value" name="discount_value" inputmode="decimal" min="0" step="0.01"
+               @if ($discountType === 'percent') max="100" @endif value="{{ $discountValue }}" aria-describedby="discount_hint">
+        @error('discount_value')<p class="field-error">{{ $message }}</p>@enderror
+    </div>
+    <p class="field-hint span-2" id="discount_hint">
+        Sleva platí pro celý doklad. Procentní sleva může být nejvýše 100 %.
+        Pevná částka se odečte přesně z konečné ceny včetně DPH a nesmí ji překročit.
+        Rozdělení slevy mezi položky a přepočet DPH se provedou při uložení. U volby „Bez slevy“ zadejte hodnotu 0.
+    </p>
+</div>
+
 <div class="form-grid mt">
     <div class="field span-2">
         <label for="note">Poznámka (tiskne se na fakturu)</label>
@@ -376,6 +404,16 @@
         const body = document.getElementById('items-body');
         const template = document.getElementById('item-row-template');
         const regimeSelect = document.getElementById('vat_regime');
+        const discountType = document.getElementById('discount_type');
+        const discountValue = document.getElementById('discount_value');
+        function applyDiscountType() {
+            const percent = discountType.value === 'percent';
+            if (discountType.value === 'none') discountValue.value = '0';
+            document.getElementById('discount_value_label').textContent = percent ? 'Sleva (%)' : 'Sleva (Kč)';
+            if (percent) discountValue.max = '100';
+            else discountValue.removeAttribute('max');
+        }
+        discountType.addEventListener('change', applyDiscountType);
 
         // Přepínání polí dle režimu DPH: neaktivní pole se skryjí a zakážou
         // (disabled → neodesílají se), takže server dostane jen pole zvoleného

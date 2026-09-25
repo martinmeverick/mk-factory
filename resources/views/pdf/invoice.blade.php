@@ -405,6 +405,9 @@
 </table>
 
 {{-- Položky --}}
+@if ($data->hasDiscount())
+    <p class="vat-note">Ceny položek jsou uvedeny před slevou. Sleva za celý doklad je odečtena v souhrnu.</p>
+@endif
 <table class="items">
     <thead>
         @if ($data->showsVatColumns())
@@ -437,9 +440,9 @@
                     <td>{{ $line->unit }}</td>
                     <td class="num">{{ $line->unitPrice->formatCzech() }}</td>
                     <td class="num">{{ $line->vatRateFormatted() }}</td>
-                    <td class="num">{{ $line->lineSubtotal->formatCzech() }}</td>
-                    <td class="num">{{ $line->lineVat->formatCzech() }}</td>
-                    <td class="num">{{ $line->lineTotal->formatCzech() }}</td>
+                    <td class="num">{{ $line->originalSubtotal()->formatCzech() }}</td>
+                    <td class="num">{{ $line->originalVat()->formatCzech() }}</td>
+                    <td class="num">{{ $line->originalTotal()->formatCzech() }}</td>
                 </tr>
             @else
                 <tr>
@@ -447,7 +450,7 @@
                     <td class="num">{{ $line->quantityFormatted() }}</td>
                     <td>{{ $line->unit }}</td>
                     <td class="num">{{ $line->unitPrice->formatCzech() }}</td>
-                    <td class="num">{{ $line->lineTotal->formatCzech() }}</td>
+                    <td class="num">{{ $line->originalTotal()->formatCzech() }}</td>
                 </tr>
             @endif
         @endforeach
@@ -467,6 +470,13 @@
             @endif
         </td>
         <td>
+            @if ($data->hasDiscount())
+                <table class="totals-table">
+                    <tr><td class="key">Celkem před slevou</td><td class="num">{{ $data->originalTotal()->formatCzech() }}</td></tr>
+                    <tr><td class="key">{{ $data->discountLabel() }}</td><td class="num">−{{ $data->discountTotal->formatCzech() }}</td></tr>
+                    <tr><td class="key">Celkem po slevě</td><td class="num">{{ $data->total->formatCzech() }}</td></tr>
+                </table>
+            @endif
             @if ($data->showsVatColumns())
                 <table class="recap">
                     <thead>

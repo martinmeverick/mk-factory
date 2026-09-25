@@ -15,6 +15,12 @@
                 @method('PUT')
                 <div class="form-grid">
                     <div class="field span-2">
+                        <label for="profile_name">Název fakturačního profilu</label>
+                        <input type="text" id="profile_name" name="profile_name" value="{{ old('profile_name', $organization->profile_name) }}" maxlength="255">
+                        <p class="muted">Interní označení pro přepínání, například značka. Na faktuře zůstává obchodní název vystavovatele.</p>
+                        @error('profile_name')<p class="field-error">{{ $message }}</p>@enderror
+                    </div>
+                    <div class="field span-2">
                         <label for="name">Obchodní název *</label>
                         <input type="text" id="name" name="name" value="{{ old('name', $organization->name) }}" required>
                         @error('name')<p class="field-error">{{ $message }}</p>@enderror

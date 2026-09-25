@@ -34,6 +34,7 @@ class OrganizationSettingsController extends Controller
         $organization = app(CurrentOrganization::class)->getOrFail();
 
         $data = $request->validate([
+            'profile_name' => ['nullable', 'string', 'max:255'],
             'name' => ['required', 'string', 'max:255'],
             'ico' => ['nullable', 'string', 'max:20'],
             'dic' => ['nullable', 'string', 'max:20'],

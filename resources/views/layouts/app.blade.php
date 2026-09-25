@@ -17,7 +17,7 @@
 
         @isset($currentOrganization)
             <div class="sidebar-org" title="Aktivní organizace">
-                {{ $currentOrganization->name }}
+                {{ $currentOrganization->profile_name ?: $currentOrganization->name }}
             </div>
         @endisset
 
